@@ -15,6 +15,9 @@ jobs:
     env:
       CC: gcc-14
       CXX: g++-14
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 2G
       PKG_CONFIG_PATH: /opt/tlgdeps/lib/pkgconfig:/opt/tlgdeps/lib64/pkgconfig:/opt/tlgdeps/lib/x86_64-linux-gnu/pkgconfig
       CMAKE_PREFIX_PATH: /opt/tlgdeps
       LD_LIBRARY_PATH: /opt/tlgdeps/lib:/opt/tlgdeps/lib64:/opt/tlgdeps/lib/x86_64-linux-gnu
@@ -28,7 +31,7 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends gcc-14 g++-14 cmake ninja-build pkg-config nasm \
+          sudo apt-get install -y -q --no-install-recommends gcc-14 g++-14 cmake ninja-build pkg-config nasm ccache \
             curl git python3-venv python3-tk libvulkan-dev glslang-tools libboost-dev \
             libxxhash-dev zlib1g-dev libx11-dev libxcb1-dev libxext-dev libxrandr-dev libxcursor-dev \
             libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols \
@@ -52,6 +55,12 @@ jobs:
         with:
           path: /opt/tlgdeps
           key: tlgdeps-ubuntu2404-${{ hashFiles('port/packaging/linux/build_deps.sh') }}
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-normal-linux-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-normal-linux-${{ runner.os }}-
       - name: Build
         id: build
         run: |
@@ -66,6 +75,12 @@ jobs:
           TLG_RENDERER_V2=1 TLG_LTO=ON TLG_PGO=off bash build.sh
       # The unit tests need no GPU, display or game file. Each test step runs even when an earlier
       # one failed (all failures show in one run); any failure fails the job before Package.
+      - name: Save compiler cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-normal-linux-${{ runner.os }}-${{ github.sha }}
       - name: C tests
         # build.sh's test list, reusing out/ from Build (same TLG_LTO/TLG_PGO: nothing is rebuilt).
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

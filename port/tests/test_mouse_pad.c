@@ -5,6 +5,14 @@
 #include <assert.h>
 #include <unistd.h>
 #include "../src/runtime_pad.c"
+/* No power-switch backend in this mouse/touchpad test. */
+int runtime_power_wheel_gameplay(void){return 1;}
+void runtime_power_wheel_status(IssPowerWheelStatus *out){memset(out,0,sizeof(*out));}
+void runtime_power_wheel_request(int index){(void)index;}
+void runtime_power_wheel_visual(int open,int choice){(void)open;(void)choice;}
+void tlggpu_power_wheel_settings(int *enabled,int keys[4],int *instant){
+    *enabled=0;*instant=0;memset(keys,0,4*sizeof(*keys));
+}
 // runtime_mouse_aim.c (the native aim hook) needs the guest; pad tests run without it.
 int runtime_mouse_aim_installed(void) { return 0; }
 int runtime_mouse_aim_motion(float dx, float dy, float sensitivity, int invert_y, int active) { (void)dx; (void)dy; (void)sensitivity; (void)invert_y; (void)active; return 0; }
