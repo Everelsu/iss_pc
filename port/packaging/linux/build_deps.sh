@@ -11,7 +11,19 @@ trap 'rm -rf "$work"' EXIT
 cd "$work"
 
 fetch() { # url dir
-    mkdir -p "$2" && curl -fsSL "$1" | tar -xz -C "$2" --strip-components=1
+    local archive="$work/$2-download.tar.gz"
+    mkdir -p "$2"
+    # Download completely before extracting; a reset must not leave a partial tree.
+    if ! curl -fsSL --retry 2 --retry-all-errors --connect-timeout 15 --max-time 60 "$1" -o "$archive"; then
+        if [[ "$1" == https://ffmpeg.org/releases/ffmpeg-7.1.2.tar.gz ]]; then
+            echo 'FFmpeg release server unavailable; using the same official n7.1.2 tag.'
+            curl -fsSL --retry 2 --retry-all-errors --connect-timeout 15 --max-time 90 \
+                https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n7.1.2.tar.gz -o "$archive"
+        else
+            return 1
+        fi
+    fi
+    tar -xzf "$archive" -C "$2" --strip-components=1
 }
 
 fetch https://github.com/libsdl-org/SDL/releases/download/release-3.2.24/SDL3-3.2.24.tar.gz sdl
@@ -54,3 +66,4 @@ fetch https://ffmpeg.org/releases/ffmpeg-7.1.2.tar.gz ffmpeg
     --enable-avcodec --enable-avformat --enable-avutil --enable-swscale --enable-swresample \
     && make -j"$JOBS" && make install)
 echo "Dependencies in $PREFIX"
+
