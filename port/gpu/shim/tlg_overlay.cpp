@@ -433,6 +433,11 @@ void ImageTab() {
         ImGui::BeginDisabled(!s.rcas || rcas_blocked);
         SliderRow(TL("Sharpening strength", "Intensidade da nitidez"), s.rcas_strength, 0, 100, "%d%%", TL("How strong the sharpening is.", "Quão forte é a nitidez."));
         ImGui::EndDisabled();
+#ifdef TLG_RENDERER_V2
+        CheckRow(TL("Temporal upscaler FSR 3.1 (experimental, next start)", "Upscaler temporal FSR 3.1 (experimental, próxima partida)"), s.iss_temporal,
+                 TL("Replaces the game's anti-aliasing with AMD FSR 3.1 temporal. Read at start. If it cannot be created the game keeps its own anti-aliasing (see the log).",
+                    "Troca o anti-aliasing do jogo pelo FSR 3.1 temporal da AMD. Lido na partida. Se não puder ser criado, o jogo mantém o anti-aliasing dele (veja o log)."));
+#endif
         ImGui::EndTable();
     }
     ImGui::SeparatorText(TL("Draw distance and detail", "Distância de visão e detalhe"));

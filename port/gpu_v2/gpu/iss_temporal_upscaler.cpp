@@ -109,14 +109,25 @@ public:
         create_info.structSize = sizeof(create_info);
         // The game's anti-aliasing input is LDR; the depth convention is the game's.
         create_info.flags = depth_inverted ? FFX_VK_PORTABLE_CONTEXT_DEPTH_INVERTED : 0;
+        // TLG_ISS_TEMPORAL_DEBUG=1: the FSR 3 library prints its own errors and warnings to stderr.
+        if (const char* debug = std::getenv("TLG_ISS_TEMPORAL_DEBUG"); debug && debug[0] == '1') {
+            create_info.flags |= FFX_VK_PORTABLE_CONTEXT_DEBUG_CHECKING;
+        }
         create_info.maxRenderSize = {render_width, render_height};
         create_info.maxOutputSize = {output_width, output_height};
         if (const u64 issues = ffxVkPortableValidateUpscaleCreateInfo(&create_info)) {
             LOG_WARNING(Render_Vulkan, "IssTemporal: FSR 3 create info invalid:{}", IssueNames(issues));
             return false;
         }
-        if (ffxVkPortableUpscaleContextCreate(&device_info, &create_info, &context) != FFX_VK_PORTABLE_OK) {
-            LOG_WARNING(Render_Vulkan, "IssTemporal: FSR 3 context creation failed");
+        if (const auto result = ffxVkPortableUpscaleContextCreate(&device_info, &create_info, &context);
+            result != FFX_VK_PORTABLE_OK) {
+            LOG_WARNING(Render_Vulkan,
+                        "IssTemporal: FSR 3 context creation failed (result {}, render {}x{}, output {}x{}, "
+                        "write-without-format {}, shaderFloat16 {}, subgroup size control {})",
+                        static_cast<int>(result), render_width, render_height, output_width, output_height,
+                        device_info.shaderStorageImageWriteWithoutFormatEnabled == VK_TRUE,
+                        device_info.shaderFloat16Enabled == VK_TRUE,
+                        device_info.subgroupSizeControlEnabled == VK_TRUE);
             context = nullptr;
             return false;
         }

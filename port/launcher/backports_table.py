@@ -75,6 +75,12 @@ MENU = [
            'Deixa a imagem final mais nítida. Precisa do FSR 1 quando a imagem do jogo é menor que a janela.')),
     _menu('Image', 'rcas_strength', 'int', '60', ('Sharpening strength', 'Intensidade da nitidez'),
           ('How strong the sharpening is.', 'Quão forte é a nitidez.'), lo=0, hi=100, unit='%'),
+    _make('menu:iss_temporal', 'menu', 'iss_temporal', '', 'bool', '0',
+          ('Temporal upscaler FSR 3.1 (experimental, next start)', 'Upscaler temporal FSR 3.1 (experimental, próxima partida)'),
+          ("Replaces the game's anti-aliasing with AMD FSR 3.1 temporal (renderer v2). Read at start. If it cannot be "
+           'created the game keeps its own anti-aliasing (see the log).',
+           'Troca o anti-aliasing do jogo pelo FSR 3.1 temporal da AMD (renderer v2). Lido na partida. Se não puder '
+           'ser criado, o jogo mantém o anti-aliasing dele (veja o log).'), live=False, tab='Image'),
     # Draw distance (gpu/shim/tlg_view.h): the in-game menu's sliders; the same ranges.
     _menu('View', 'lod_scale', 'float', '1', ('LOD distance', 'Distância do LOD'),
           ('How far objects keep their detailed models (every LOD band). Above 1x costs CPU and GPU; '
