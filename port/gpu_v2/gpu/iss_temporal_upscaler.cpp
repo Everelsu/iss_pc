@@ -3,6 +3,7 @@
 #include "iss_temporal_upscaler.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -226,8 +227,11 @@ struct Upscaler::Impl {
     void Resolve(const Frame& frame, const DepthTargets& depth_targets);
     void RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth, const Mat4& reproject,
                       const float jitter[2]);
-    void Skip(const char* why);
+    /// Why a marker was left to the game's own anti-aliasing, for the counters and the 5 s report.
+    enum class Reason : u8 { Marker, Colour, Depth, Output, Size, Samples, Usage, BlitFormat, Camera, Backend, Count };
+    void Skip(const char* why, Reason reason);
     void Fail(const char* why);
+    void Report();
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -267,13 +271,43 @@ struct Upscaler::Impl {
     // Reasons already logged (literals), so a persistent problem does not fill the log.
     std::vector<const char*> logged;
     u64 resolved = 0;
+    // The 5 s window of the report: markers resolved, and left to the game by reason.
+    u64 window_resolved = 0;
+    std::array<u64, static_cast<size_t>(Reason::Count)> window_skipped{};
+    std::chrono::steady_clock::time_point window_start = std::chrono::steady_clock::now();
 };
 
-void Upscaler::Impl::Skip(const char* why) {
+void Upscaler::Impl::Skip(const char* why, Reason reason) {
+    ++window_skipped[static_cast<size_t>(reason)];
     if (std::find(logged.begin(), logged.end(), why) == logged.end()) {
         logged.push_back(why);
         LOG_WARNING(Render_Vulkan, "IssTemporal: frame left to the game: {}", why);
     }
+}
+
+void Upscaler::Impl::Report() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window_start < std::chrono::seconds(5)) {
+        return;
+    }
+    static constexpr std::array<const char*, static_cast<size_t>(Reason::Count)> names{
+        "marker", "colour", "depth", "output", "size", "samples", "usage", "blit format", "camera", "backend"};
+    u64 skipped = 0;
+    std::string detail;
+    for (size_t i = 0; i < window_skipped.size(); ++i) {
+        if (window_skipped[i]) {
+            skipped += window_skipped[i];
+            detail += fmt::format("{}{} {}", detail.empty() ? "" : ", ", names[i], window_skipped[i]);
+        }
+    }
+    if (window_resolved || skipped) {
+        LOG_INFO(Render_Vulkan, "IssTemporal: {} resolved, {} left to the game in {:.1f} s{}{}{}", window_resolved,
+                 skipped, std::chrono::duration<double>(now - window_start).count(), skipped ? " (" : "", detail,
+                 skipped ? ")" : "");
+    }
+    window_resolved = 0;
+    window_skipped.fill(0);
+    window_start = now;
 }
 
 void Upscaler::Impl::Fail(const char* why) {
@@ -439,44 +473,70 @@ void Upscaler::Impl::Resolve(const Frame& frame, const DepthTargets& depth_targe
     if (failed) {
         return;
     }
-    // The three images, by the address they start at. The hook may not know the scene depth (address 0).
-    const u64 depth_addr = frame.depth_addr ? frame.depth_addr
-                                            : depth_targets.Find(frame.render_width, frame.render_height);
-    const auto color_id = texture_cache.FindImageFromRange(frame.color_addr, 1, false);
-    const auto depth_id = depth_addr ? texture_cache.FindImageFromRange(depth_addr, 1, false) : VideoCore::ImageId{};
-    const auto out_id = texture_cache.FindImageFromRange(frame.output_addr, 1, false);
-    if (!color_id || !depth_id || !out_id) {
-        Skip("an image is not registered (colour, depth or output; no depth target of the render size seen?)");
+    // The three images, by the address they start at and the render size. A guest address can hold
+    // several images (a render target and a texture of the same memory), so the lookup takes the most
+    // recently used one of that size instead of giving up when there are two.
+    const u32 w = frame.render_width, h = frame.render_height;
+    const auto color_id = texture_cache.FindImageAt(frame.color_addr, w, h, vk::ImageUsageFlagBits::eSampled);
+    if (!color_id) {
+        Skip("the colour image of the game's anti-aliasing is not in the texture cache at the marker's address and size",
+             Reason::Colour);
+        return;
+    }
+    // The hook may not know the scene depth (address 0): then the recent depth targets of the render size,
+    // newest first, and the first one the texture cache still has.
+    VideoCore::ImageId depth_id{};
+    {
+        u64 candidates[DepthTargets::kCandidates];
+        size_t count = 0;
+        if (frame.depth_addr) {
+            candidates[count++] = frame.depth_addr;
+        } else {
+            count = depth_targets.Candidates(w, h, candidates);
+        }
+        for (size_t i = 0; i < count && !depth_id; ++i) {
+            depth_id = texture_cache.FindImageAt(candidates[i], w, h, vk::ImageUsageFlagBits::eSampled);
+        }
+        if (!depth_id) {
+            Skip(count ? "none of the recent depth targets of the render size is in the texture cache"
+                       : "no depth target of the render size was drawn into yet",
+                 Reason::Depth);
+            return;
+        }
+    }
+    const auto out_id = texture_cache.FindImageAt(frame.output_addr, w, h, vk::ImageUsageFlagBits::eTransferDst);
+    if (!out_id) {
+        Skip("the output image of the game's anti-aliasing is not in the texture cache at the marker's address and size",
+             Reason::Output);
         return;
     }
     auto& color = texture_cache.GetImage(color_id);
     auto& depth = texture_cache.GetImage(depth_id);
     auto& target = texture_cache.GetImage(out_id);
-    const u32 w = frame.render_width, h = frame.render_height;
     const u32 ow = target.info.size.width, oh = target.info.size.height;
     if (color.info.size.width != w || color.info.size.height != h || depth.info.size.width != w ||
         depth.info.size.height != h) {
-        Skip("the colour or depth size is not the render size the game announced");
+        Skip("the colour or depth size is not the render size the game announced", Reason::Size);
         return;
     }
     if (ow != w || oh != h) {
         // Rendering below the output needs the grain and the UI at output size: a later step.
-        Skip("the output is not the render size (an internal resolution below the output is not supported yet)");
+        Skip("the output is not the render size (an internal resolution below the output is not supported yet)", Reason::Size);
         return;
     }
     if (color.info.num_samples != 1 || depth.info.num_samples != 1 || target.info.num_samples != 1) {
-        Skip("multisampled image");
+        Skip("multisampled image", Reason::Samples);
         return;
     }
     if (!(color.usage_flags & vk::ImageUsageFlagBits::eSampled) ||
         !(depth.usage_flags & vk::ImageUsageFlagBits::eSampled) ||
         !(target.usage_flags & vk::ImageUsageFlagBits::eTransferDst)) {
-        Skip("an image lacks the usage the upscaler needs (sampled colour and depth, transfer destination output)");
+        Skip("an image lacks the usage the upscaler needs (sampled colour and depth, transfer destination output)", Reason::Usage);
         return;
     }
     const auto format_props = instance.GetPhysicalDevice().getFormatProperties(target.info.pixel_format);
     if (!(format_props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eBlitDst)) {
-        Skip("the output format cannot be a blit destination");
+        Skip("the output format cannot be a blit destination", Reason::BlitFormat);
         return;
     }
 
@@ -515,7 +575,7 @@ void Upscaler::Impl::Resolve(const Frame& frame, const DepthTargets& depth_targe
     if (!have_previous || !Reproject(frame.view_proj, previous_view_proj, reproject)) {
         // No usable previous camera: no motion, and a new history.
         if (!Reproject(frame.view_proj, frame.view_proj, reproject)) {
-            Skip("the camera matrix cannot be inverted");
+            Skip("the camera matrix cannot be inverted", Reason::Camera);
             return;
         }
         reset = true;
@@ -617,7 +677,7 @@ void Upscaler::Impl::Resolve(const Frame& frame, const DepthTargets& depth_targe
     params.frame_id = frame.frame_id;
     if (!backend->Record(cmdbuf, params)) {
         // The dispatch is not in the command buffer: this frame has no anti-aliasing; the next may.
-        Skip("the backend refused the frame");
+        Skip("the backend refused the frame", Reason::Backend);
         have_previous = false;
         return;
     }
@@ -642,6 +702,7 @@ void Upscaler::Impl::Resolve(const Frame& frame, const DepthTargets& depth_targe
     previous_view_proj = frame.view_proj;
     previous_frame_id = frame.frame_id;
     have_previous = true;
+    ++window_resolved;
     if (resolved++ == 0) {
         LOG_INFO(Render_Vulkan, "IssTemporal: first frame resolved ({}x{}, {}); colour {}, depth {}, output {}", w, h,
                  backend->Name(), vk::to_string(color.info.pixel_format), vk::to_string(depth.info.pixel_format),
@@ -661,10 +722,11 @@ void Upscaler::OnMarker(const u32* payload, u32 dwords, const DepthTargets& dept
     }
     Frame frame;
     if (!ParseMarker(payload, dwords, frame)) {
-        impl->Skip("a malformed marker");
+        impl->Skip("a malformed marker", Impl::Reason::Marker);
         return;
     }
     impl->Resolve(frame, depth_targets);
+    impl->Report();
 }
 
 } // namespace Vulkan::IssTemporal

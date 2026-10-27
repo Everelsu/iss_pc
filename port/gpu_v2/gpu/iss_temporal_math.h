@@ -4,6 +4,7 @@
 // tests/test_iss_temporal.cpp can check them alone.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -175,31 +176,52 @@ inline bool MotionOfPixel(const Mat4& reproject, float x, float y, float depth, 
     return true;
 }
 
-/// The depth targets the game has drawn into with depth writes, by size, as guest addresses. The hook
-/// does not know where the scene depth is, so the renderer remembers the last depth target of each
-/// size and the marker's render size picks the scene's (shadow maps and the like have other sizes).
+/// The depth targets the game has drawn into with depth writes, as guest addresses. The hook does not
+/// know where the scene depth is, so the renderer remembers the recent depth targets and the marker's
+/// render size picks the scene's (shadow maps and the like have other sizes). A size can have several
+/// targets (the game swaps buffers, a replaced image keeps its address), so the candidates come newest
+/// first and the caller takes the first one the texture cache still has.
 /// Addresses, not image ids: the image may be replaced before the marker, and an address looked up in
 /// the texture cache is always safe.
 class DepthTargets {
 public:
+    static constexpr std::size_t kCandidates = 4; ///< most Candidates() returns
+
     void Note(std::uint64_t address, std::uint32_t width, std::uint32_t height) {
+        ++clock;
+        Entry* oldest = &entries[0];
         for (auto& entry : entries) {
-            if (entry.width == width && entry.height == height) {
-                entry.address = address;
+            if (entry.address == address && entry.width == width && entry.height == height) {
+                entry.seq = clock; // drawn into again: newest of its size
                 return;
             }
-        }
-        entries[next] = {address, width, height};
-        next = (next + 1) % entries.size();
-    }
-    /// 0 when no depth target of that size was drawn into.
-    [[nodiscard]] std::uint64_t Find(std::uint32_t width, std::uint32_t height) const {
-        for (const auto& entry : entries) {
-            if (entry.width == width && entry.height == height) {
-                return entry.address;
+            if (entry.seq < oldest->seq) {
+                oldest = &entry;
             }
         }
-        return 0;
+        *oldest = {address, width, height, clock};
+    }
+    /// Addresses of this size, newest first; returns how many were written to `out` (at most kCandidates).
+    std::size_t Candidates(std::uint32_t width, std::uint32_t height, std::uint64_t (&out)[kCandidates]) const {
+        std::array<const Entry*, 16> matches{};
+        std::size_t count = 0;
+        for (const auto& entry : entries) {
+            if (entry.seq != 0 && entry.width == width && entry.height == height) {
+                matches[count++] = &entry;
+            }
+        }
+        std::sort(matches.begin(), matches.begin() + count,
+                  [](const Entry* a, const Entry* b) { return a->seq > b->seq; });
+        const std::size_t written = count < kCandidates ? count : kCandidates;
+        for (std::size_t i = 0; i < written; ++i) {
+            out[i] = matches[i]->address;
+        }
+        return written;
+    }
+    /// The newest target of that size; 0 when none was drawn into.
+    [[nodiscard]] std::uint64_t Find(std::uint32_t width, std::uint32_t height) const {
+        std::uint64_t out[kCandidates];
+        return Candidates(width, height, out) ? out[0] : 0;
     }
 
 private:
@@ -207,9 +229,10 @@ private:
         std::uint64_t address = 0;
         std::uint32_t width = 0;
         std::uint32_t height = 0;
+        std::uint64_t seq = 0; ///< 0: unused
     };
-    std::array<Entry, 8> entries{};
-    std::uint32_t next = 0;
+    std::array<Entry, 16> entries{};
+    std::uint64_t clock = 0;
 };
 
 } // namespace Vulkan::IssTemporal

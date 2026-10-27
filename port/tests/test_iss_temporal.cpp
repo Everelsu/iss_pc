@@ -183,10 +183,27 @@ void TestDepthTargets() {
     targets.Note(0x1000, 1920, 1080);
     targets.Note(0x2000, 2048, 2048); // a shadow map
     CHECK(targets.Find(1920, 1080) == 0x1000);
-    targets.Note(0x3000, 1920, 1080); // the same size replaces
+    targets.Note(0x3000, 1920, 1080); // a newer target of the same size comes first
     CHECK(targets.Find(1920, 1080) == 0x3000);
     CHECK(targets.Find(2048, 2048) == 0x2000);
-    for (std::uint32_t i = 0; i < 20; ++i) { // more sizes than entries: the oldest go
+    {   // all of the size, newest first; drawing into an older one again moves it to the front
+        std::uint64_t out[DepthTargets::kCandidates];
+        CHECK(targets.Candidates(1920, 1080, out) == 2);
+        CHECK(out[0] == 0x3000 && out[1] == 0x1000);
+        targets.Note(0x1000, 1920, 1080);
+        CHECK(targets.Candidates(1920, 1080, out) == 2);
+        CHECK(out[0] == 0x1000 && out[1] == 0x3000);
+        CHECK(targets.Candidates(640, 480, out) == 0);
+    }
+    for (std::uint32_t i = 0; i < 6; ++i) { // no more than kCandidates come back
+        targets.Note(0x5000 + i, 1280, 720);
+    }
+    {
+        std::uint64_t out[DepthTargets::kCandidates];
+        CHECK(targets.Candidates(1280, 720, out) == DepthTargets::kCandidates);
+        CHECK(out[0] == 0x5005 && out[3] == 0x5002);
+    }
+    for (std::uint32_t i = 0; i < 20; ++i) { // more targets than entries: the oldest go
         targets.Note(0x9000 + i, 100 + i, 100);
     }
     CHECK(targets.Find(119, 100) == 0x9000 + 19);

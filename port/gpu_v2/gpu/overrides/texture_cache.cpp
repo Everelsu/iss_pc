@@ -1147,6 +1147,26 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
     return {};
 }
 
+ImageId TextureCache::FindImageAt(VAddr address, u32 width, u32 height, vk::ImageUsageFlags required_usage) {
+    AssertNoAscTextureAccess();
+    ImageId best{};
+    u64 best_tick = 0;
+    if (const auto it = image_address_index.find(address); it != image_address_index.end()) {
+        for (const ImageId image_id : it->second) {
+            const Image& image = slot_images[image_id];
+            if (image.info.size.width != width || image.info.size.height != height ||
+                image.info.num_samples != 1 || (image.usage_flags & required_usage) != required_usage) {
+                continue;
+            }
+            if (!best || image.tick_accessed_last > best_tick) {
+                best = image_id;
+                best_tick = image.tick_accessed_last;
+            }
+        }
+    }
+    return best;
+}
+
 void TextureCache::ReportLookupMemo() const {
     std::fprintf(stderr,
         "TEXTURE_LOOKUP_MEMO gc_tick=%llu meta=%llu/%llu view=%llu/%llu stencil=%llu/%llu\n",
