@@ -38,7 +38,8 @@ static inline int iss_native_live_projection_redirect(unsigned char *image,size_
  int32_t displacements[2];
  for(unsigned i=0;i<2;i++){
   intptr_t distance=(intptr_t)(cells+i*4)-(intptr_t)(image+sites[16+i].offset+7);
-  if(distance<INT32_MIN||distance>INT32_MAX)return 0;displacements[i]=(int32_t)distance;
+  if(distance<INT32_MIN||distance>INT32_MAX)return 0;
+  displacements[i]=(int32_t)distance;
  }
  for(unsigned i=0;i<2;i++)memcpy(image+sites[16+i].offset+3,&displacements[i],4);
  return 1;

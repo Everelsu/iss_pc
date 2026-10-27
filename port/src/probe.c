@@ -827,7 +827,8 @@ static void install_iss_native_live_trace(const char *app0,Segment *segments,uin
     unsigned char *bridges[4];
     for(unsigned k=0;k<4;k++){
         bridges[k]=allocate(page_size);unsigned n=iss_karma_bridge_ex(bridges[k],helpers[k],image+sites[k],(uintptr_t)image+sites[k]+lengths[k],lengths[k],k==3?6:k==2?5:1);
-        if(n>page_size)fail("Native observer bridge overflow");protect(bridges[k],page_size,5);
+        if(n>page_size)fail("Native observer bridge overflow");
+        protect(bridges[k],page_size,5);
     }
     runtime_native_live_attach((uintptr_t)image);
     if(native_live_cells&&runtime_native_status()==1){
@@ -848,7 +849,8 @@ static void install_iss_native_live_trace(const char *app0,Segment *segments,uin
             unsigned char *bridge=allocate(page_size);
             unsigned n=iss_karma_bridge_ex(bridge,(uintptr_t)runtime_native_live_aspect_camera,image+ISS_NATIVE_ASPECT_SITE,
                 (uintptr_t)image+ISS_NATIVE_ASPECT_SITE+ISS_NATIVE_ASPECT_STOLEN,ISS_NATIVE_ASPECT_STOLEN,1);
-            if(n>page_size)fail("Native aspect bridge overflow");protect(bridge,page_size,5);
+            if(n>page_size)fail("Native aspect bridge overflow");
+            protect(bridge,page_size,5);
             memset(image+ISS_NATIVE_ASPECT_SITE,0x90,ISS_NATIVE_ASPECT_STOLEN);
             iss_karma_jump(image+ISS_NATIVE_ASPECT_SITE,(uintptr_t)bridge);
             runtime_native_live_aspect_enable();puts("Native live aspect: guarded main-camera projection refresh enabled");
