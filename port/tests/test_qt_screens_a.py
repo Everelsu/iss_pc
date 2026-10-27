@@ -115,11 +115,16 @@ class KeyMapTests(unittest.TestCase):
 
 
 class MouseAndEnvironmentTests(unittest.TestCase):
+    def test_deleted_mouse_emulation_keys_cannot_be_reactivated(self):
+        for key in ('mouse_smoothing', 'mouse_accel', 'mouse_deadzone'):
+            with self.assertRaises(KeyError):
+                padsettings.mouse_update(key, 0.5)
+
     def test_mouse_defaults_and_clamping(self):
         self.assertTrue(padsettings.mouse_value({}, 'mouse_enabled'))
         self.assertEqual(1.0, padsettings.mouse_value({}, 'mouse_sensitivity'))
         self.assertEqual(10.0, padsettings.mouse_value({'mouse_sensitivity': '99'}, 'mouse_sensitivity'))
-        self.assertEqual(0.5, padsettings.mouse_value({'mouse_smoothing': 'abc'}, 'mouse_smoothing'))
+        self.assertEqual(1.0, padsettings.mouse_value({'mouse_sensitivity': 'abc'}, 'mouse_sensitivity'))
         self.assertFalse(padsettings.mouse_value({'mouse_enabled': '0'}, 'mouse_enabled'))
 
     def test_update_removes_the_key_at_its_default(self):
@@ -127,7 +132,7 @@ class MouseAndEnvironmentTests(unittest.TestCase):
         self.assertEqual({'mouse_sensitivity': '1.50'}, padsettings.mouse_update('mouse_sensitivity', 1.5))
         self.assertEqual({'mouse_enabled': '0'}, padsettings.mouse_update('mouse_enabled', False))
         self.assertEqual({'mouse_enabled': None}, padsettings.mouse_update('mouse_enabled', True))
-        self.assertEqual({'mouse_deadzone': '0.50'}, padsettings.mouse_update('mouse_deadzone', 7))
+        self.assertEqual({'mouse_sensitivity': '10.00'}, padsettings.mouse_update('mouse_sensitivity', 70))
 
     def test_nothing_is_exported_by_default(self):
         self.assertEqual({}, padsettings.environment({}))
@@ -679,8 +684,8 @@ class ControllerTests(unittest.TestCase):
     def test_the_other_keys_of_tlg_ini_survive(self):
         self.ini.parent.mkdir(parents=True)
         self.ini.write_text('# tlg settings\nbp01=0\nfps_limit=60\n')
-        self.controls.setValue('m:mouse_accel', '0.5')
-        self.assertEqual({'bp01', 'fps_limit', 'mouse_accel'},
+        self.controls.setValue('m:mouse_sensitivity', '1.5')
+        self.assertEqual({'bp01', 'fps_limit', 'mouse_sensitivity'},
                          {l.split('=')[0] for l in self.ini_text().splitlines() if '=' in l})
 
     def test_turning_the_mouse_off_writes_mouse_enabled_0_and_dims_the_rows(self):

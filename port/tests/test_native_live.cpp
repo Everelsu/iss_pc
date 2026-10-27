@@ -11,8 +11,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
-static unsigned calls;static uintptr_t object;static int index;
-static void __attribute__((ms_abi)) observe(const void* p,int frame,uint64_t){calls++;object=(uintptr_t)p;index=frame;}
+static unsigned calls;static uintptr_t object;static int observed_frame_index;
+static void __attribute__((ms_abi)) observe(const void* p,int frame,uint64_t){calls++;object=(uintptr_t)p;observed_frame_index=frame;}
 static void __attribute__((ms_abi)) observeObject(const void* p){object=(uintptr_t)p;calls++;}
 int main(){
  assert(iss_native_live_option(nullptr)&&iss_native_live_option("1"));
@@ -111,7 +111,7 @@ int main(){
   memcpy(code+2048,type?target_end:frame_end,type?sizeof(target_end):sizeof(frame_end));
   DWORD old;assert(VirtualProtect(code,4096,PAGE_EXECUTE_READ,&old));FlushInstructionCache(GetCurrentProcess(),code,4096);
   using Fn=void(__attribute__((sysv_abi)) *)(void*,int,uint64_t);
-  ((Fn)code)((void*)0x12345678,42,0);assert(object==0x12345678&&index==42&&calls==unsigned(type+1));
+  ((Fn)code)((void*)0x12345678,42,0);assert(object==0x12345678&&observed_frame_index==42&&calls==unsigned(type+1));
   assert(VirtualProtect(code,4096,PAGE_READWRITE,&old));
  }
  // New safe-point bridge passes the original R13, without disturbing callers.

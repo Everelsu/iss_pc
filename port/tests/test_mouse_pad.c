@@ -1,4 +1,4 @@
-/* The mouse through the pad (src/runtime_pad.c): camera on the right stick, buttons as PS4
+/* The mouse through the pad (src/runtime_pad.c): native camera motion independent of the right stick, buttons as PS4
  * buttons, and touchpad mode (hold the mode key, here Mouse X1): the mouse becomes a finger. The
  * window's mouse is a stub the test drives; scePadReadState runs for real. */
 #define _GNU_SOURCE
@@ -65,7 +65,7 @@ int main(void) {
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189");
     assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD));
     assert(pad_init()==0 && pad_open(1,0,0,NULL)==1);
-    settings=(TlgGpuInputSettings){.mouse_enabled=1,.sensitivity=1.0f,.smoothing=0.0f};
+    settings=(TlgGpuInputSettings){.mouse_enabled=1,.sensitivity=1.0f};
     fake.captured=1;
 
     /* Camera motion goes to the direct hook, never the legacy emulated stick. */

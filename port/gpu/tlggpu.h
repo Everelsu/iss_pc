@@ -99,7 +99,7 @@ void tlggpu_mouse_take(TlgGpuMouse *mouse);
 typedef struct {
     int32_t mouse_enabled, invert_y;
     int32_t rumble;             /* controller vibration on (tlg.ini rumble, TLG_RUMBLE) */
-    float sensitivity, smoothing, accel, deadzone;
+    float sensitivity;
     char key_map[512];
 } TlgGpuInputSettings;
 void tlggpu_input_settings(TlgGpuInputSettings *settings);

@@ -238,9 +238,6 @@ extern "C" void tlggpu_input_settings(TlgGpuInputSettings* out) {
     out->invert_y = s.mouse_invert_y ? 1 : 0;
     out->rumble = s.rumble ? 1 : 0;
     out->sensitivity = s.mouse_sensitivity;
-    out->smoothing = s.mouse_smoothing;
-    out->accel = s.mouse_accel;
-    out->deadzone = s.mouse_deadzone;
     std::snprintf(out->key_map, sizeof(out->key_map), "%s", s.key_map.c_str());
 }
 extern "C" void tlggpu_mouse_pad_hud(int active, float x, float y, int touching, int clicking) {

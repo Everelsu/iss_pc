@@ -7,7 +7,7 @@
  *   Enter Options, Tab left touchpad (photo mode), Backspace right touchpad (pause menu),
  *   IJKL d-pad (I up, K down, J left, L right).
  * Mouse (while the window has it, see tlggpu_mouse_take; Esc releases it, a click takes it back):
- *   motion turns the camera (right stick, src/mouse_stick.h), left button R2 (use the power),
+ *   motion turns the camera through the direct native aim hook, left button R2 (use the power),
  *   right button L2 (aim), middle button R3. X1/X2 and the wheel are free for TLG_KEY_MAP
  *   ("Mouse X1", "Wheel Up", ...). */
 #define _GNU_SOURCE
@@ -20,7 +20,6 @@
 #include <pthread.h>
 #include <time.h>
 #include <SDL3/SDL.h>
-#include "mouse_stick.h"
 #include "iss_mouse_aim.h"
 #include "iss_power_wheel.h"
 #include "power_wheel_input.h"
@@ -564,7 +563,6 @@ static struct { bool active, two_fingers; MouseTouch finger; MouseTouchOut out; 
  * notch is one press (menus scroll one item per notch). TLG_MOUSE_LOG=1 (or TLG_MOUSE_TEST)
  * logs what the game gets. Called under lock. */
 enum { WHEEL_PULSE_US=80000, WHEEL_GAP_US=40000 };
-static MouseStick mouse_stick;
 static PwHold power_hold;
 static float power_mouse_dx,power_mouse_dy,power_cursor_x,power_cursor_y;
 static int power_cursor_source;
@@ -598,14 +596,12 @@ static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
     tlggpu_input_settings(&in);
     if(power_hold.open){
         runtime_mouse_aim_motion(0,0,in.sensitivity,in.invert_y,0);
-        memset(&mouse_stick,0,sizeof(mouse_stick));
         return 0; /* mouse motion selects a wheel sector; clicks do not attack */
     }
     const uint64_t now=d->timestamp;
     static bool was_captured;
     if (!in.mouse_enabled || !m.captured) {
         runtime_mouse_aim_motion(0,0,in.sensitivity,in.invert_y,0);
-        memset(&mouse_stick,0,sizeof(mouse_stick));
         memset(wheel,0,sizeof(wheel));
         mouse_shake_reset(&mouse_shake);
         mouse_shaking=0;
@@ -650,7 +646,6 @@ static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
     }
     mouse_pad.active=pad_mode;
     if (pad_mode) {
-        memset(&mouse_stick,0,sizeof(mouse_stick));
         const int left=(raw>>(MOUSE_LEFT-MOUSE_SOURCE)) & 1, middle=(raw>>(MOUSE_MIDDLE-MOUSE_SOURCE)) & 1;
         const int right=(raw>>(MOUSE_RIGHT-MOUSE_SOURCE)) & 1;
         mouse_pad.two_fingers=right;
@@ -679,13 +674,11 @@ static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
         motion.aim_pitch+=(in.invert_y ? m.dy : -m.dy)*k;
         motion.yaw=fminf(fmaxf(motion.yaw,-1.4f),1.4f);
         motion.aim_pitch=fminf(fmaxf(motion.aim_pitch,-1.2f),1.2f);
-        memset(&mouse_stick,0,sizeof(mouse_stick));
     } else {
         /* Mouse camera input never enters the legacy right-stick emulator.
          * If the guarded direct hook is unavailable, leave controller axes
          * untouched and do not silently revive old mouse settings. */
         runtime_mouse_aim_motion(m.dx,m.dy,in.sensitivity,in.invert_y,1);
-        memset(&mouse_stick,0,sizeof(mouse_stick));
     }
     if(aiming_can || pad_mode)runtime_mouse_aim_motion(0,0,in.sensitivity,in.invert_y,0);
     if (!aiming_can || pad_mode) { mouse_shake_reset(&mouse_shake); mouse_shaking=0; }

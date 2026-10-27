@@ -70,10 +70,9 @@ int main(void) {
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189");
     assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD));
     assert(pad_init()==0 && pad_open(1,0,0,NULL)==1);
-    /* Legacy mouse knobs cannot alter physical controller axes, including
+    /* Direct mouse motion cannot alter physical controller axes, including
      * when the direct hook is unavailable. Motion is sent only to direct aim. */
     supplied_settings.mouse_enabled=1;supplied_settings.sensitivity=1;
-    supplied_settings.smoothing=.95f;supplied_settings.accel=2;supplied_settings.deadzone=.5f;
     supplied_mouse.captured=1;supplied_mouse.dx=120;supplied_mouse.dy=-80;
     for(int available=0;available<2;available++){
         direct_available=available;
