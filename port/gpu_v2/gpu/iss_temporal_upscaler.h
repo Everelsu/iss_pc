@@ -18,6 +18,7 @@
 #include "iss_temporal_math.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image.h"
+#include "video_core/texture_cache/image_view.h"
 
 namespace VideoCore {
 class TextureCache;
@@ -80,7 +81,32 @@ bool Available();
 /// consumed: with the setting on and a capable device only.
 void Probe(const Instance& instance);
 
+/// An image the draws after the marker are redirected to (see Upscaler::RedirectColor).
+struct UiTarget {
+    vk::ImageView view{};
+    vk::ImageLayout layout = vk::ImageLayout::eGeneral;
+    u32 width = 0;
+    u32 height = 0;
+};
+
+/// The output-size image of a frame, for the presenter (DisplayOverride).
+struct DisplayImage {
+    vk::Image image{};
+    vk::ImageView view{}; ///< in the format and with the mapping the presenter asked for, General layout
+    u32 width = 0;
+    u32 height = 0;
+};
+
+/// The presenter asks, with the address of the guest buffer it is about to show: the output-size image the
+/// frame was drawn in instead, if the draws of this frame were redirected. Ends the redirection (the frame
+/// is over); call it for every flip. The image stays in the General layout: the caller moves it to the layout
+/// it samples in and back.
+bool DisplayOverride(VAddr guest_address, vk::Format view_format, const vk::ComponentMapping& mapping,
+                     DisplayImage& display);
+
 class Upscaler {
+    friend bool DisplayOverride(VAddr, vk::Format, const vk::ComponentMapping&, DisplayImage&);
+
 public:
     Upscaler(const Instance& instance, Scheduler& scheduler, Runtime& runtime,
              VideoCore::TextureCache& texture_cache);
@@ -90,6 +116,32 @@ public:
     /// is the NOP's body, `dwords` its length. Does nothing unless the setting is on. `depth_targets`
     /// finds the scene depth when the marker does not name it.
     void OnMarker(const u32* payload, u32 dwords, const DepthTargets& depth_targets);
+
+    // ---- Rendering below the output size ---------------------------------------------------------
+    // When the game renders at a size smaller than the output, the marker leaves the upscaled image in an
+    // output-size twin of the anti-aliasing target. Until the flip every draw into a target of the render
+    // size goes to an output-size twin of that target, with its viewport, scissor and screen-space
+    // coordinates scaled by UiScale(); a texture that has a twin is read through it. The grain and the HUD
+    // so draw at the output's resolution. All of these are called from the thread recording draws.
+
+    /// Draws are being redirected (after a marker that upscaled to a larger size, before the flip).
+    bool UiActive() const;
+    /// Output size over render size (both axes the same within rounding): 1 when not redirecting.
+    float UiScaleX() const;
+    float UiScaleY() const;
+    /// A colour target about to be drawn into. False: draw into the guest's image as always.
+    bool RedirectColor(VideoCore::ImageId image, const VideoCore::ImageViewInfo& view_info, UiTarget& target);
+    /// The depth target of a redirected draw. False when the colour was not redirected or sizes differ.
+    bool RedirectDepth(VideoCore::ImageId image, UiTarget& target);
+    /// A texture about to be sampled: the twin's view when the image has one written this frame.
+    bool RedirectSampled(VideoCore::ImageId image, const VideoCore::ImageViewInfo& view_info, vk::ImageView& view,
+                         vk::ImageLayout& layout);
+    /// Orders the writes of the twins before what the next draw does with them (ends the render pass).
+    void UiBarrier();
+    /// A draw sampled a twin since the last UiBarrier (its pass must start after the writes of the twin).
+    bool UiSampledPending() const;
+    /// Extra mip LOD bias for the scene's material textures while the render size is below the output, or 0.
+    float SceneMipBias() const;
 
 private:
     struct Impl;
