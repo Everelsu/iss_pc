@@ -112,8 +112,7 @@ MENU = [
            'Sobe o nível mínimo de qualidade enquanto a taxa de quadros fica abaixo do alvo e devolve quando '
            'há folga (menus e carregamentos são ignorados). O mínimo abaixo continua valendo.'),
           choices=(('0', 'Off', 'Desligado'), ('30', '30 FPS', '30 FPS'), ('45', '45 FPS', '45 FPS'),
-                   ('60', '60 FPS', '60 FPS')),
-          hidden=True),
+                   ('60', '60 FPS', '60 FPS'))),
     _menu('View', 'quality_floor', 'int', '1', ('Minimum dynamic quality level', 'Nível mínimo da qualidade dinâmica'),
           ('The game steps its quality level (0 best, 14 lowest: shorter LOD, fewer shadow cascades, fewer objects) '
            'up in heavy scenes and back down in light ones. Raising the minimum keeps the lighter levels: more FPS '
