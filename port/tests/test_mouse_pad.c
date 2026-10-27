@@ -15,7 +15,12 @@ void tlggpu_power_wheel_settings(int *enabled,int keys[4],int *instant){
 }
 // runtime_mouse_aim.c (the native aim hook) needs the guest; pad tests run without it.
 int runtime_mouse_aim_installed(void) { return 0; }
-int runtime_mouse_aim_motion(float dx, float dy, float sensitivity, int invert_y, int active) { (void)dx; (void)dy; (void)sensitivity; (void)invert_y; (void)active; return 0; }
+static float direct_dx, direct_dy, direct_sensitivity;
+static int direct_invert, direct_active;
+int runtime_mouse_aim_motion(float dx, float dy, float sensitivity, int invert_y, int active) {
+    direct_dx=dx;direct_dy=dy;direct_sensitivity=sensitivity;
+    direct_invert=invert_y;direct_active=active;return 0;
+}
 
 static TlgGpuMouse fake;
 static TlgGpuInputSettings settings;
@@ -63,18 +68,18 @@ int main(void) {
     settings=(TlgGpuInputSettings){.mouse_enabled=1,.sensitivity=1.0f,.smoothing=0.0f};
     fake.captured=1;
 
-    /* Camera: motion is the right stick, up/down and left/right with the right signs. */
+    /* Camera motion goes to the direct hook, never the legacy emulated stick. */
     PadData d=move(0,0,2);
     assert(d.right_x==128 && d.right_y==128);
     d=move(60,0,3);
-    assert(d.right_x>200 && d.right_y==128);
+    assert(d.right_x==128 && d.right_y==128 && direct_dx==60 && direct_active && direct_sensitivity==1.0f);
     d=move(-60,0,3);
-    assert(d.right_x<56);
+    assert(d.right_x==128 && direct_dx==-60);
     d=move(0,60,3);
-    assert(d.right_y>200);
+    assert(d.right_y==128 && direct_dy==60 && !direct_invert);
     settings.invert_y=1;
     d=move(0,60,3);
-    assert(d.right_y<56);
+    assert(d.right_y==128 && direct_dy==60 && direct_invert);
     settings.invert_y=0;
     d=move(0,0,12);
     assert(d.right_x==128 && d.right_y==128); /* at rest the stick is exactly centred */
@@ -157,7 +162,7 @@ int main(void) {
     hold(0); d=move(0,0,2);
     assert(!hud_active);
     d=move(60,0,3);
-    assert(d.right_x>200);
+    assert(d.right_x==128 && direct_dx==60 && direct_active);
     hold(LEFT); d=move(0,0,1);
     assert(d.buttons & BTN_R2);
     puts("PASS: mouse through the pad");
