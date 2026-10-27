@@ -117,7 +117,7 @@ jobs:
       - name: Compatibility regression checks
         run: |
           cmake --build out/gpu_v2 --target test_mouse_aim test_hud_trace test_native_resolution test_karma_regression test_karma_quarantine test_karma_save_versions test_karma_save_session test_karma_profiles test_exclusive_presentation test_graphics_settings -j2
-          ctest --test-dir out/gpu_v2 --output-on-failure
+          ctest --test-dir out/gpu_v2 --output-on-failure -R '^(mouse_aim|hud_trace|native_resolution|karma_regression|karma_quarantine|karma_save_versions|karma_save_session|karma_profiles|exclusive_presentation|graphics_settings)$'
       - name: Added feature tests
         run: |
           cmake --build out/gpu_v2 -j2
