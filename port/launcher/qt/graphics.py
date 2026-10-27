@@ -4,12 +4,14 @@ in-game Insert menu use: settings.json (display mode, VSync, FPS overlay, GPU ac
 switches, VRAM budget) and tlg.ini through the same table and the same save path as the Fixes
 screen (Backend.setFix -> infamous_run.save_experimental). It adds no key of its own."""
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 
 from . import gfxlogic, logic, report
 from .logic import backports_table, shader_cache, tlg_run
 from .rowsmodel import RowsModel
+import dlss_setup  # noqa: E402  (launcher/dlss_setup.py: the NVIDIA DLL, the bridge, the download)
 import native_resolution  # noqa: E402  (launcher/native_resolution.py: output + internal resolution)
 import preset_share  # noqa: E402  (launcher/preset_share.py; logic put the folder on sys.path)
 
@@ -50,6 +52,9 @@ STEPS = {'menu:overlay_scale': 10, 's:vram_budget_mb': 200}
 class Graphics(QObject):
     changed = Signal()
     vramFound = Signal(object)
+    dlssProgressed = Signal(int, int)
+    dlssChecked = Signal(object)
+    dlssFinished = Signal(object)    # a Component, or a DlssError
     scrollRequested = Signal(int)   # used by the screenshot tool
     dialogChanged = Signal()
 
@@ -69,6 +74,13 @@ class Graphics(QObject):
         self._dialog, self._handlers = {}, {}
         self._imported = None      # (profile name, targets) of the last imported file
         self.vramFound.connect(self._on_vram)
+        self._dlss_confirm, self._dlss_busy = False, False
+        self._dlss_cancel = threading.Event()
+        self._dlss_msg, self._dlss_tone, self._dlss_done, self._dlss_total = '', 'info', 0, 0
+        self._dlss_checked = None
+        self.dlssChecked.connect(self._on_dlss_checked)
+        self.dlssProgressed.connect(self._on_dlss_progress)
+        self.dlssFinished.connect(self._on_dlss_finished)
         backend.profileChanged.connect(self.rebuild)
         backend.langChanged.connect(self.rebuild)
         backend.saves.changed.connect(self.changed)
@@ -89,6 +101,7 @@ class Graphics(QObject):
             self.vramFound.emit(self.probes['vram']() if 'vram' in self.probes else
                                 gfxlogic.detect_vram_mb(self._gpu_name()))
         threading.Thread(target=work, daemon=True).start()
+        self._check_dlss()
 
     def _gpu_name(self):
         gpu = self.backend._gpu
@@ -433,6 +446,138 @@ class Graphics(QObject):
     @Property(bool, notify=changed)
     def canSuggest(self):
         return bool(self.suggested) and int(self.settings.get('vram_budget_mb', 0)) != self.suggested
+
+    # -- NVIDIA DLSS (dlss_setup.py): status of the two DLLs and the download ---------------------------------
+    def _dlss_configured(self):
+        return str(tlg_run.read_ini(tlg_run.user_dir() / 'tlg.ini').get('dlss_dll_dir', ''))
+
+    def _dlss_state(self):
+        """The last check (None until the first one ends): the signature check starts PowerShell, so it runs
+        on a worker thread (_check_dlss) and the properties only read its result."""
+        return self._dlss_checked
+
+    def _check_dlss(self):
+        def work():
+            state = self.probes['dlss_status']() if 'dlss_status' in self.probes else dlss_setup.status(
+                tlg_run.user_dir(), self._dlss_configured(), tlg_run.V2_PROBE.parent)
+            self.dlssChecked.emit(state)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_dlss_checked(self, state):
+        self._dlss_checked = state
+        self.changed.emit()
+
+    def _dlss_target(self):
+        configured = self._dlss_configured()
+        return Path(configured) if configured else dlss_setup.default_folder(tlg_run.user_dir())
+
+    @Property(str, notify=changed)
+    def dlssHint(self):
+        return self.t('dlss_what')
+
+    @Property(str, notify=changed)
+    def dlssDllLine(self):
+        state = self._dlss_state()
+        return dlss_setup.dll_line(self.t, state['dll']) if state else self.t('dlss_checking')
+
+    @Property(str, notify=changed)
+    def dlssBridgeLine(self):
+        state = self._dlss_state()
+        return dlss_setup.bridge_line(self.t, state['bridge']) if state else ''
+
+    @Property(str, notify=changed)
+    def dlssReadyLine(self):
+        state = self._dlss_state()
+        return self.t('dlss_ready') if state and dlss_setup.usable(state) else ''
+
+    @Property(bool, notify=changed)
+    def dlssHasDll(self):
+        state = self._dlss_state()
+        return bool(state and state['dll'].ok)
+
+    @Property(bool, notify=changed)
+    def dlssConfirming(self):
+        return self._dlss_confirm
+
+    @Property(bool, notify=changed)
+    def dlssBusy(self):
+        return self._dlss_busy
+
+    @Property(str, notify=changed)
+    def dlssConfirmText(self):
+        return self.t('dlss_confirm', mb=dlss_setup.NOMINAL_MB, url=dlss_setup.SOURCE_URL, repo=dlss_setup.REPO_URL)
+
+    @Property(str, notify=changed)
+    def dlssProgressText(self):
+        mb = 1024 * 1024
+        if self._dlss_total:
+            return self.t('dlss_progress', done=self._dlss_done // mb, total=self._dlss_total // mb)
+        return self.t('dlss_progress_unknown', done=self._dlss_done // mb)
+
+    @Property(float, notify=changed)
+    def dlssProgress(self):
+        return self._dlss_done / self._dlss_total if self._dlss_total else 0.0
+
+    @Property(str, notify=changed)
+    def dlssMessage(self):
+        return self._dlss_msg
+
+    @Property(str, notify=changed)
+    def dlssMessageTone(self):
+        return self._dlss_tone
+
+    @Slot()
+    def askDlssDownload(self):
+        if not self._dlss_busy:
+            self._dlss_confirm, self._dlss_msg = True, ''
+            self.changed.emit()
+
+    @Slot()
+    def cancelDlssAsk(self):
+        self._dlss_confirm = False
+        self.changed.emit()
+
+    @Slot()
+    def startDlssDownload(self):
+        """The confirmed download, on a worker thread; progress and the end come back as signals."""
+        if self._dlss_busy:
+            return
+        self._dlss_confirm, self._dlss_busy = False, True
+        self._dlss_cancel.clear()
+        self._dlss_done = self._dlss_total = 0
+        target = self._dlss_target()
+        download = self.probes.get('dlss_download', dlss_setup.download)
+
+        def work():
+            try:
+                result = download(target, progress=self.dlssProgressed.emit, cancel=self._dlss_cancel)
+            except dlss_setup.DlssError as error:
+                result = error
+            except Exception as error:      # never leave the screen stuck on "downloading"
+                result = dlss_setup.DlssError('network', error)
+            self.dlssFinished.emit(result)
+        threading.Thread(target=work, daemon=True).start()
+        self.changed.emit()
+
+    @Slot()
+    def cancelDlssDownload(self):
+        self._dlss_cancel.set()
+
+    def _on_dlss_progress(self, done, total):
+        self._dlss_done, self._dlss_total = done, total
+        self.changed.emit()
+
+    def _on_dlss_finished(self, result):
+        self._dlss_busy = False
+        if isinstance(result, dlss_setup.DlssError):
+            self._dlss_msg = self.t('dlss_err_' + result.key, detail=result.detail)
+            self._dlss_tone = 'info' if result.key == 'cancelled' else 'bad'
+        else:
+            version = '.'.join((result.version or '?').split('.')[:3])
+            self._dlss_msg, self._dlss_tone = self.t('dlss_done', version=version, path=str(result.path)), 'good'
+        self.changed.emit()
+        if not isinstance(result, dlss_setup.DlssError):
+            self._check_dlss()
 
     # -- shader cache ----------------------------------------------------------------------------------------
     def read_cache_bytes(self):

@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "infamous_renderer/native_instanced_feature.h"
 #include "native_gbuffer.h"
+#include "iss_temporal_dlss.h"
 
 #include <vk_mem_alloc.h>
 

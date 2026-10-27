@@ -121,6 +121,39 @@ Item {
                 }
             }
 
+            // ---- NVIDIA DLSS ---------------------------------------------------------------------
+            SectionTitle { text: Theme.tr("dlss_section"); accent: page.accent }
+            Rectangle {
+                width: parent.width; height: dlssCol.implicitHeight + 36
+                radius: 14; color: Theme.card; border.width: 1; border.color: Theme.cardLine
+                Column {
+                    id: dlssCol
+                    x: 18; y: 18; width: parent.width - 36; spacing: 10
+                    Text { width: parent.width; text: Graphics.dlssHint; wrapMode: Text.WordWrap; color: Theme.textDim
+                           font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
+                    Text { width: parent.width; text: Graphics.dlssDllLine; wrapMode: Text.WrapAnywhere; color: "#fff"
+                           font.family: Theme.fontText; font.pixelSize: 14 }
+                    Text { width: parent.width; text: Graphics.dlssBridgeLine; wrapMode: Text.WrapAnywhere; color: "#fff"
+                           font.family: Theme.fontText; font.pixelSize: 14 }
+                    NoteBar { visible: Graphics.dlssReadyLine !== ""; text: Graphics.dlssReadyLine; bar: Theme.ok; textColor: Theme.textSoft }
+                    NoteBar { visible: Graphics.dlssMessage !== ""; text: Graphics.dlssMessage
+                              bar: Graphics.dlssMessageTone === "good" ? Theme.ok : (Graphics.dlssMessageTone === "bad" ? Theme.bad : Theme.cardLine); textColor: Theme.textSoft }
+                    Text { visible: Graphics.dlssConfirming; width: parent.width; text: Graphics.dlssConfirmText; wrapMode: Text.WordWrap; color: Theme.textSoft
+                           font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
+                    Text { visible: Graphics.dlssBusy; text: Graphics.dlssProgressText; color: Theme.textSoft; font.family: Theme.fontText; font.pixelSize: 14 }
+                    Rectangle { visible: Graphics.dlssBusy; width: parent.width; height: 6; radius: 3; color: Theme.cardLine
+                                Rectangle { width: parent.width * Graphics.dlssProgress; height: parent.height; radius: 3; color: page.accent } }
+                    Row {
+                        spacing: 10
+                        GhostButton { visible: !Graphics.dlssConfirming && !Graphics.dlssBusy; compact: true
+                                      text: Theme.tr(Graphics.dlssHasDll ? "dlss_download_again" : "dlss_download"); onClicked: Graphics.askDlssDownload() }
+                        GhostButton { visible: Graphics.dlssConfirming; compact: true; text: Theme.tr("dlss_confirm_yes"); onClicked: Graphics.startDlssDownload() }
+                        GhostButton { visible: Graphics.dlssConfirming; compact: true; text: Theme.tr("gfx_cache_no"); onClicked: Graphics.cancelDlssAsk() }
+                        GhostButton { visible: Graphics.dlssBusy; compact: true; tone: "danger"; text: Theme.tr("dlss_cancel"); onClicked: Graphics.cancelDlssDownload() }
+                    }
+                }
+            }
+
             // ---- shader cache ------------------------------------------------------------------
             SectionTitle { text: Theme.tr("gfx_sec_cache"); accent: page.accent }
             Rectangle {
