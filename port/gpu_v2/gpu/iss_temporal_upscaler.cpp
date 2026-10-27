@@ -286,6 +286,7 @@ struct Upscaler::Impl {
         VAddr guest_address = 0;
         vk::Format format{};
         bool fresh = false; ///< seeded or drawn into since the last flip
+        u64 last_used = 0;  ///< resolved-frame counter when it was last drawn into
         struct View {
             vk::Format format;
             vk::ComponentMapping mapping;
@@ -298,6 +299,7 @@ struct Upscaler::Impl {
         VideoCore::UniqueImage image;
         vk::Format format{};
         vk::UniqueImageView view;
+        vk::ImageAspectFlags aspect{};
         bool cleared = false;
     };
     Twin* GetTwin(VideoCore::ImageId id, const VideoCore::Image& image);
@@ -306,21 +308,35 @@ struct Upscaler::Impl {
     void ReleaseTwins();
     bool RedirectColor(VideoCore::ImageId id, const VideoCore::ImageViewInfo& info, UiTarget& target);
     bool RedirectDepth(VideoCore::ImageId id, UiTarget& target);
+    UiFit ClassifyColor(VideoCore::ImageId id, const VideoCore::ImageViewInfo& info);
+    UiFit ClassifyDepth(VideoCore::ImageId id);
+    DepthTwin* GetDepthTwin(const VideoCore::Image& image);
+    void Abort(const char* why);
+    void PruneTwins();
+    vk::ImageView RecordDisplayCopy(vk::CommandBuffer cmd, const DisplayImage& display, vk::Format view_format,
+                                    const vk::ComponentMapping& mapping);
     bool RedirectSampled(VideoCore::ImageId id, const VideoCore::ImageViewInfo& info, vk::ImageView& view,
                          vk::ImageLayout& layout);
     void UiBarrier();
-    bool Display(VAddr address, vk::Format view_format, const vk::ComponentMapping& mapping, DisplayImage& display);
+    bool Display(VAddr address, DisplayImage& display);
     /// Seeds the twin of the anti-aliasing target from the upscaler's output and starts the redirection.
     void BeginRedirect(VideoCore::ImageId aa_id, const VideoCore::Image& aa_image, vk::CommandBuffer cmdbuf);
     void ReadCost();
 
     std::mutex ui_mutex;
     std::atomic<bool> ui_active{false};
+    std::atomic<u32> aborts{0};
+    u64 frame_counter = 0;
+    // What the presenter samples: a copy of the displayed twin (the twins stay in the General layout).
+    VideoCore::UniqueImage present_image;
+    vk::Format present_format{};
+    std::vector<Twin::View> present_views;
+    bool depth_reversed = false;
     u32 ui_scene_w = 0, ui_scene_h = 0, ui_out_w = 0, ui_out_h = 0;
     std::atomic<float> ui_scale_x{1.0f}, ui_scale_y{1.0f};
     u32 ui_aa_index = VideoCore::ImageId{}.index;
     bool ui_sampled_pending = false;
-    std::unordered_map<u32, std::unique_ptr<Twin>> twins;
+    std::unordered_map<u32, std::shared_ptr<Twin>> twins;
     std::vector<std::unique_ptr<DepthTwin>> depth_twins;
     std::atomic<float> mip_bias{0.0f};
 
@@ -419,6 +435,11 @@ void Upscaler::Impl::Fail(const char* why) {
     failed = true;
     mip_bias.store(0.0f, std::memory_order_relaxed);
     ui_active.store(false, std::memory_order_relaxed);
+    scheduler.Finish();
+    {
+        std::scoped_lock lock{ui_mutex};
+        ReleaseTwins();
+    }
     g_available.store(false, std::memory_order_relaxed);
     iss_temporal_set_renderer_ready(0);
     LOG_WARNING(Render_Vulkan, "IssTemporal: off for this run ({}); the game keeps its own anti-aliasing", why);
@@ -871,6 +892,7 @@ void Upscaler::Impl::Resolve(const Frame& frame, const DepthTargets& depth_targe
         cmdbuf.blitImage(vk::Image(output_image), vk::ImageLayout::eTransferSrcOptimal, aa_twin->image,
                          vk::ImageLayout::eGeneral, region, vk::Filter::eNearest);
         RecordMemoryBarrier(cmdbuf);
+        PruneTwins();
         std::scoped_lock lock{ui_mutex};
         // Any twin of the last frame that was not shown is not this frame's.
         for (auto& entry : twins) {
@@ -880,6 +902,9 @@ void Upscaler::Impl::Resolve(const Frame& frame, const DepthTargets& depth_targe
             depth_twin->cleared = false;
         }
         aa_twin->fresh = true;
+        ++frame_counter;
+        aa_twin->last_used = frame_counter;
+        depth_reversed = inverted;
         ui_aa_index = out_id.index;
         ui_sampled_pending = false;
         ui_active.store(true, std::memory_order_release);
@@ -912,7 +937,41 @@ void Upscaler::Impl::ReleaseTwins() {
     // The caller waited for the GPU.
     twins.clear();
     depth_twins.clear();
+    present_views.clear();
+    present_image = VideoCore::UniqueImage{};
     ui_active.store(false, std::memory_order_relaxed);
+}
+
+void Upscaler::Impl::Abort(const char* why) {
+    // The rest of this frame is drawn as the game draws it, and the presenter shows the guest's buffer (FSR 1).
+    {
+        std::scoped_lock lock{ui_mutex};
+        ui_active.store(false, std::memory_order_relaxed);
+        ui_sampled_pending = false;
+        for (auto& entry : twins) {
+            entry.second->fresh = false;
+        }
+        for (auto& depth : depth_twins) {
+            depth->cleared = false;
+        }
+    }
+    if (aborts.fetch_add(1, std::memory_order_relaxed) < 8) {
+        LOG_WARNING(Render_Vulkan, "IssTemporal: drawing below the output size given up for this frame: {}", why);
+    }
+}
+
+void Upscaler::Impl::PruneTwins() {
+    // Twins of targets the game stopped drawing into (images are destroyed and made again) would keep their
+    // output-size memory for the rest of the run.
+    std::scoped_lock lock{ui_mutex};
+    for (auto it = twins.begin(); it != twins.end();) {
+        if (frame_counter - it->second->last_used > 120) {
+            scheduler.DeferOperation([twin = std::move(it->second)] {});
+            it = twins.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 Upscaler::Impl::Twin* Upscaler::Impl::GetTwin(VideoCore::ImageId id, const VideoCore::Image& image) {
@@ -926,7 +985,7 @@ Upscaler::Impl::Twin* Upscaler::Impl::GetTwin(VideoCore::ImageId id, const Video
         slot.reset();
     }
     const auto device = instance.GetDevice();
-    auto twin = std::make_unique<Twin>();
+    auto twin = std::make_shared<Twin>();
     twin->image = VideoCore::UniqueImage(device, instance.GetAllocator());
     twin->image.Create(vk::ImageCreateInfo{
         .flags = vk::ImageCreateFlagBits::eMutableFormat,
@@ -1007,12 +1066,32 @@ void Upscaler::Impl::SeedFromGuest(Twin& twin, VideoCore::Image& image) {
         .dstOffsets = std::array<vk::Offset3D, 2>{vk::Offset3D{0, 0, 0},
                                                   vk::Offset3D{static_cast<s32>(ui_out_w), static_cast<s32>(ui_out_h), 1}},
     };
-    scheduler.Recorder().Record([src, dst, region](vk::CommandBuffer cmd) {
+    // Integer and other formats that cannot be filtered take the nearest texel.
+    const bool linear = static_cast<bool>(instance.GetPhysicalDevice().getFormatProperties(twin.format).optimalTilingFeatures &
+                                          vk::FormatFeatureFlagBits::eSampledImageFilterLinear);
+    scheduler.Recorder().Record([src, dst, region, linear](vk::CommandBuffer cmd) {
         RecordMemoryBarrier(cmd);
         cmd.blitImage(src, vk::ImageLayout::eTransferSrcOptimal, dst, vk::ImageLayout::eGeneral, region,
-                      vk::Filter::eLinear);
+                      linear ? vk::Filter::eLinear : vk::Filter::eNearest);
         RecordMemoryBarrier(cmd);
     });
+}
+
+UiFit Upscaler::Impl::ClassifyColor(VideoCore::ImageId id, const VideoCore::ImageViewInfo& info) {
+    if (!ui_active.load(std::memory_order_relaxed)) {
+        return UiFit::Other;
+    }
+    std::scoped_lock lock{ui_mutex};
+    const auto& image = texture_cache.GetImage(id);
+    if (image.info.size.width != ui_scene_w || image.info.size.height != ui_scene_h || image.info.props.is_depth) {
+        return UiFit::Other;
+    }
+    if (image.info.num_samples != 1 || info.range.base.level != 0 || info.range.base.layer != 0 ||
+        info.range.extent.layers > 1) {
+        return UiFit::No;
+    }
+    Twin* twin = GetTwin(id, image);
+    return twin && SameFamily(info.format, twin->format) ? UiFit::Yes : UiFit::No;
 }
 
 bool Upscaler::Impl::RedirectColor(VideoCore::ImageId id, const VideoCore::ImageViewInfo& info, UiTarget& target) {
@@ -1024,11 +1103,6 @@ bool Upscaler::Impl::RedirectColor(VideoCore::ImageId id, const VideoCore::Image
         return false;
     }
     auto& image = texture_cache.GetImage(id);
-    if (image.info.size.width != ui_scene_w || image.info.size.height != ui_scene_h || image.info.num_samples != 1 ||
-        image.info.props.is_depth || info.range.base.level != 0 || info.range.base.layer != 0 ||
-        info.range.extent.layers > 1) {
-        return false;
-    }
     Twin* twin = GetTwin(id, image);
     if (!twin || !SameFamily(info.format, twin->format)) {
         return false;
@@ -1040,8 +1114,78 @@ bool Upscaler::Impl::RedirectColor(VideoCore::ImageId id, const VideoCore::Image
         }
         twin->fresh = true;
     }
+    twin->last_used = frame_counter;
     target = {TwinView(*twin, info.format, kIdentity), vk::ImageLayout::eGeneral, ui_out_w, ui_out_h};
     return true;
+}
+
+Upscaler::Impl::DepthTwin* Upscaler::Impl::GetDepthTwin(const VideoCore::Image& image) {
+    const vk::Format format = image.info.pixel_format;
+    for (auto& entry : depth_twins) {
+        if (entry->format == format) {
+            return entry.get();
+        }
+    }
+    const bool has_stencil = image.info.props.has_stencil;
+    const auto aspect = has_stencil ? vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil
+                                    : vk::ImageAspectFlagBits::eDepth;
+    const auto device = instance.GetDevice();
+    auto made = std::make_unique<DepthTwin>();
+    made->format = format;
+    made->image = VideoCore::UniqueImage(device, instance.GetAllocator());
+    made->image.Create(vk::ImageCreateInfo{
+        .imageType = vk::ImageType::e2D,
+        .format = format,
+        .extent = {ui_out_w, ui_out_h, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransferDst,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    });
+    if (!made->image) {
+        LOG_WARNING(Render_Vulkan, "IssTemporal: the output-size depth target ({}) could not be made",
+                    vk::to_string(format));
+        return nullptr;
+    }
+    made->aspect = aspect;
+    SetObjectName(device, vk::Image(made->image), "iss temporal output-size depth");
+    made->view = Check<"create iss temporal depth twin view">(device.createImageViewUnique({
+        .image = made->image,
+        .viewType = vk::ImageViewType::e2D,
+        .format = format,
+        .subresourceRange = {aspect, 0, 1, 0, 1},
+    }));
+    const vk::Image handle = made->image;
+    scheduler.EndRendering();
+    scheduler.Recorder().Record([handle, aspect](vk::CommandBuffer cmd) {
+        const vk::ImageMemoryBarrier2 barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eNone,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = handle,
+            .subresourceRange = {aspect, 0, 1, 0, 1},
+        };
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+    });
+    depth_twins.push_back(std::move(made));
+    return depth_twins.back().get();
+}
+
+UiFit Upscaler::Impl::ClassifyDepth(VideoCore::ImageId id) {
+    if (!ui_active.load(std::memory_order_relaxed)) {
+        return UiFit::Other;
+    }
+    std::scoped_lock lock{ui_mutex};
+    const auto& image = texture_cache.GetImage(id);
+    if (image.info.size.width != ui_scene_w || image.info.size.height != ui_scene_h || !image.info.props.is_depth) {
+        return UiFit::Other;
+    }
+    return image.info.num_samples == 1 && GetDepthTwin(image) ? UiFit::Yes : UiFit::No;
 }
 
 bool Upscaler::Impl::RedirectDepth(VideoCore::ImageId id, UiTarget& target) {
@@ -1053,74 +1197,21 @@ bool Upscaler::Impl::RedirectDepth(VideoCore::ImageId id, UiTarget& target) {
         return false;
     }
     const auto& image = texture_cache.GetImage(id);
-    if (image.info.size.width != ui_scene_w || image.info.size.height != ui_scene_h || image.info.num_samples != 1 ||
-        !image.info.props.is_depth) {
+    DepthTwin* twin = GetDepthTwin(image);
+    if (!twin) {
         return false;
     }
-    const vk::Format format = image.info.pixel_format;
-    DepthTwin* twin = nullptr;
-    for (auto& entry : depth_twins) {
-        if (entry->format == format) {
-            twin = entry.get();
-        }
-    }
-    const bool has_stencil = image.info.props.has_stencil;
-    const auto aspect = has_stencil ? vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil
-                                    : vk::ImageAspectFlagBits::eDepth;
-    if (!twin) {
-        const auto device = instance.GetDevice();
-        auto made = std::make_unique<DepthTwin>();
-        made->format = format;
-        made->image = VideoCore::UniqueImage(device, instance.GetAllocator());
-        made->image.Create(vk::ImageCreateInfo{
-            .imageType = vk::ImageType::e2D,
-            .format = format,
-            .extent = {ui_out_w, ui_out_h, 1},
-            .mipLevels = 1,
-            .arrayLayers = 1,
-            .samples = vk::SampleCountFlagBits::e1,
-            .tiling = vk::ImageTiling::eOptimal,
-            .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransferDst,
-            .initialLayout = vk::ImageLayout::eUndefined,
-        });
-        if (!made->image) {
-            LOG_WARNING(Render_Vulkan, "IssTemporal: the output-size depth target ({}) could not be made",
-                        vk::to_string(format));
-            return false;
-        }
-        SetObjectName(device, vk::Image(made->image), "iss temporal output-size depth");
-        made->view = Check<"create iss temporal depth twin view">(device.createImageViewUnique({
-            .image = made->image,
-            .viewType = vk::ImageViewType::e2D,
-            .format = format,
-            .subresourceRange = {aspect, 0, 1, 0, 1},
-        }));
-        const vk::Image handle = made->image;
-        scheduler.EndRendering();
-        scheduler.Recorder().Record([handle, aspect](vk::CommandBuffer cmd) {
-            const vk::ImageMemoryBarrier2 barrier{
-                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                .srcAccessMask = vk::AccessFlagBits2::eNone,
-                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-                .oldLayout = vk::ImageLayout::eUndefined,
-                .newLayout = vk::ImageLayout::eGeneral,
-                .image = handle,
-                .subresourceRange = {aspect, 0, 1, 0, 1},
-            };
-            cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
-        });
-        twin = made.get();
-        depth_twins.push_back(std::move(made));
-    }
     if (!twin->cleared) {
-        // A user interface draws on a clean depth/stencil: the scene's is not in this image.
+        // A user interface draws on a clean depth/stencil: the scene's is not in this image. The far plane is 0
+        // when the game's depth is reversed.
         twin->cleared = true;
         const vk::Image handle = twin->image;
+        const auto aspect = twin->aspect;
+        const float far_depth = depth_reversed ? 0.0f : 1.0f;
         scheduler.EndRendering();
-        scheduler.Recorder().Record([handle, aspect](vk::CommandBuffer cmd) {
+        scheduler.Recorder().Record([handle, aspect, far_depth](vk::CommandBuffer cmd) {
             RecordMemoryBarrier(cmd);
-            const vk::ClearDepthStencilValue value{.depth = 1.0f, .stencil = 0};
+            const vk::ClearDepthStencilValue value{.depth = far_depth, .stencil = 0};
             const vk::ImageSubresourceRange range{aspect, 0, 1, 0, 1};
             cmd.clearDepthStencilImage(handle, vk::ImageLayout::eGeneral, value, range);
             RecordMemoryBarrier(cmd);
@@ -1162,8 +1253,7 @@ void Upscaler::Impl::UiBarrier() {
     scheduler.Recorder().Record([](vk::CommandBuffer cmd) { RecordMemoryBarrier(cmd); });
 }
 
-bool Upscaler::Impl::Display(VAddr address, vk::Format view_format, const vk::ComponentMapping& mapping,
-                             DisplayImage& display) {
+bool Upscaler::Impl::Display(VAddr address, DisplayImage& display) {
     std::scoped_lock lock{ui_mutex};
     if (!ui_active.load(std::memory_order_relaxed)) {
         return false;
@@ -1173,9 +1263,8 @@ bool Upscaler::Impl::Display(VAddr address, vk::Format view_format, const vk::Co
     ui_sampled_pending = false;
     bool found = false;
     for (auto& [index, twin] : twins) {
-        if (twin->fresh && !found && twin->guest_address == address && SameFamily(view_format, twin->format)) {
-            display.image = twin->image;
-            display.view = TwinView(*twin, view_format, mapping);
+        if (twin->fresh && !found && twin->guest_address == address) {
+            display.keep = twin; // alive until the presenter's commands are done
             display.width = ui_out_w;
             display.height = ui_out_h;
             found = true;
@@ -1186,6 +1275,89 @@ bool Upscaler::Impl::Display(VAddr address, vk::Format view_format, const vk::Co
         depth->cleared = false;
     }
     return found;
+}
+
+vk::ImageView Upscaler::Impl::RecordDisplayCopy(vk::CommandBuffer cmd, const DisplayImage& display,
+                                                vk::Format view_format, const vk::ComponentMapping& mapping) {
+    auto* twin = static_cast<Twin*>(display.keep.get());
+    if (!twin || !SameFamily(view_format, twin->format)) {
+        return {};
+    }
+    const auto device = instance.GetDevice();
+    if (!present_image || present_format != twin->format || present_image.image_ci.extent.width != display.width ||
+        present_image.image_ci.extent.height != display.height) {
+        scheduler.Finish();
+        present_views.clear();
+        present_image = VideoCore::UniqueImage(device, instance.GetAllocator());
+        present_image.Create(vk::ImageCreateInfo{
+            .flags = vk::ImageCreateFlagBits::eMutableFormat,
+            .imageType = vk::ImageType::e2D,
+            .format = twin->format,
+            .extent = {display.width, display.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        if (!present_image) {
+            return {};
+        }
+        present_format = twin->format;
+        SetObjectName(device, vk::Image(present_image), "iss temporal presented frame");
+    }
+    const vk::Image src = twin->image;
+    const vk::Image dst = present_image;
+    // Copy the twin (General) into the image the presenter's passes sample (ShaderReadOnly).
+    const vk::ImageMemoryBarrier2 to_dst{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eTransferDstOptimal,
+        .image = dst,
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    };
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_dst});
+    RecordMemoryBarrier(cmd);
+    const vk::ImageBlit region{
+        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .srcOffsets = std::array<vk::Offset3D, 2>{
+            vk::Offset3D{0, 0, 0}, vk::Offset3D{static_cast<s32>(display.width), static_cast<s32>(display.height), 1}},
+        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .dstOffsets = std::array<vk::Offset3D, 2>{
+            vk::Offset3D{0, 0, 0}, vk::Offset3D{static_cast<s32>(display.width), static_cast<s32>(display.height), 1}},
+    };
+    cmd.blitImage(src, vk::ImageLayout::eGeneral, dst, vk::ImageLayout::eTransferDstOptimal, region,
+                  vk::Filter::eNearest);
+    const vk::ImageMemoryBarrier2 to_read{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+        .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+        .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+        .image = dst,
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    };
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_read});
+    for (const auto& entry : present_views) {
+        if (entry.format == view_format && entry.mapping == mapping) {
+            return *entry.view;
+        }
+    }
+    auto view = Check<"create iss temporal presented view">(device.createImageViewUnique({
+        .image = dst,
+        .viewType = vk::ImageViewType::e2D,
+        .format = view_format,
+        .components = mapping,
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    }));
+    const vk::ImageView handle = *view;
+    present_views.push_back({view_format, mapping, std::move(view)});
+    return handle;
 }
 
 void Upscaler::Impl::ReadCost() {
@@ -1248,6 +1420,18 @@ bool Upscaler::RedirectColor(VideoCore::ImageId image, const VideoCore::ImageVie
     return impl->RedirectColor(image, view_info, target);
 }
 
+UiFit Upscaler::ClassifyColor(VideoCore::ImageId image, const VideoCore::ImageViewInfo& view_info) {
+    return impl->ClassifyColor(image, view_info);
+}
+
+UiFit Upscaler::ClassifyDepth(VideoCore::ImageId image) {
+    return impl->ClassifyDepth(image);
+}
+
+void Upscaler::AbortRedirect(const char* why) {
+    impl->Abort(why);
+}
+
 bool Upscaler::RedirectDepth(VideoCore::ImageId image, UiTarget& target) {
     return impl->RedirectDepth(image, target);
 }
@@ -1270,10 +1454,20 @@ float Upscaler::SceneMipBias() const {
     return impl->mip_bias.load(std::memory_order_relaxed);
 }
 
-bool DisplayOverride(VAddr guest_address, vk::Format view_format, const vk::ComponentMapping& mapping,
-                     DisplayImage& display) {
+bool DisplayOverride(VAddr guest_address, DisplayImage& display) {
     auto* impl = static_cast<Upscaler::Impl*>(g_impl.load(std::memory_order_acquire));
-    return impl && impl->Display(guest_address, view_format, mapping, display);
+    return impl && impl->Display(guest_address, display);
+}
+
+vk::ImageView RecordDisplayCopy(vk::CommandBuffer cmd, const DisplayImage& display, vk::Format view_format,
+                                const vk::ComponentMapping& mapping) {
+    auto* impl = static_cast<Upscaler::Impl*>(g_impl.load(std::memory_order_acquire));
+    return impl ? impl->RecordDisplayCopy(cmd, display, view_format, mapping) : vk::ImageView{};
+}
+
+bool Redirecting() {
+    auto* impl = static_cast<Upscaler::Impl*>(g_impl.load(std::memory_order_acquire));
+    return impl && impl->ui_active.load(std::memory_order_relaxed);
 }
 
 } // namespace Vulkan::IssTemporal

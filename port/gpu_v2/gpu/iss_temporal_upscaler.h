@@ -91,21 +91,35 @@ struct UiTarget {
 
 /// The output-size image of a frame, for the presenter (DisplayOverride).
 struct DisplayImage {
-    vk::Image image{};
-    vk::ImageView view{}; ///< in the format and with the mapping the presenter asked for, General layout
+    std::shared_ptr<void> keep; ///< keeps the image alive: hold it until the presenter's commands are done
     u32 width = 0;
     u32 height = 0;
 };
 
 /// The presenter asks, with the address of the guest buffer it is about to show: the output-size image the
 /// frame was drawn in instead, if the draws of this frame were redirected. Ends the redirection (the frame
-/// is over); call it for every flip. The image stays in the General layout: the caller moves it to the layout
-/// it samples in and back.
-bool DisplayOverride(VAddr guest_address, vk::Format view_format, const vk::ComponentMapping& mapping,
-                     DisplayImage& display);
+/// is over); call it for every flip. The image itself stays in the General layout for the draws.
+bool DisplayOverride(VAddr guest_address, DisplayImage& display);
+/// Records, into the presenter's command buffer, a copy of that image into one the presenter's passes can
+/// sample (ShaderReadOnly), and returns a view of it in the format and with the mapping asked for. Null when
+/// it cannot be made: the presenter then shows the guest's buffer.
+vk::ImageView RecordDisplayCopy(vk::CommandBuffer cmd, const DisplayImage& display, vk::Format view_format,
+                                const vk::ComponentMapping& mapping);
+/// Draws are being redirected right now.
+bool Redirecting();
+
+/// What a draw's target is to the redirection.
+enum class UiFit {
+    Other, ///< not the render size: the redirection leaves it alone
+    Yes,   ///< the render size and it has a usable output-size twin
+    No,    ///< the render size but it cannot be redirected
+};
 
 class Upscaler {
-    friend bool DisplayOverride(VAddr, vk::Format, const vk::ComponentMapping&, DisplayImage&);
+    friend bool DisplayOverride(VAddr, DisplayImage&);
+    friend vk::ImageView RecordDisplayCopy(vk::CommandBuffer, const DisplayImage&, vk::Format,
+                                           const vk::ComponentMapping&);
+    friend bool Redirecting();
 
 public:
     Upscaler(const Instance& instance, Scheduler& scheduler, Runtime& runtime,
@@ -129,6 +143,12 @@ public:
     /// Output size over render size (both axes the same within rounding): 1 when not redirecting.
     float UiScaleX() const;
     float UiScaleY() const;
+    /// What the draw's targets are to the redirection. If any target of the render size is `No`, or a draw
+    /// mixes `Yes` and `Other` targets, the draw cannot be redirected: AbortRedirect, which leaves the rest of
+    /// the frame to the game's own images and the presenter's FSR 1.
+    UiFit ClassifyColor(VideoCore::ImageId image, const VideoCore::ImageViewInfo& view_info);
+    UiFit ClassifyDepth(VideoCore::ImageId image);
+    void AbortRedirect(const char* why);
     /// A colour target about to be drawn into. False: draw into the guest's image as always.
     bool RedirectColor(VideoCore::ImageId image, const VideoCore::ImageViewInfo& view_info, UiTarget& target);
     /// The depth target of a redirected draw. False when the colour was not redirected or sizes differ.
