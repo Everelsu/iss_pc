@@ -176,6 +176,10 @@ struct Values {
     /// Upscaler behind iss_temporal (renderer v2): 0 FSR 3.1, 1 NVIDIA DLSS. DLSS needs a bridge DLL and the
     /// player's own nvngx_dlss.dll (iss_temporal_dlss.h); without them the renderer uses FSR 3.1. Read at start.
     std::atomic<int> iss_temporal_backend{0};
+    /// Internal resolution behind iss_temporal: 0 as iss_native_percent says (100% = anti-aliasing at the output
+    /// size), 1 Quality 1.5x, 2 Balanced 1.7x, 3 Performance 2x, 4 Ultra performance 3x. Needs iss_native_output.
+    /// Read at start by the game side (src/iss_native_resolution.h).
+    std::atomic<int> iss_temporal_mode{0};
     /// Folder with the player's nvngx_dlss.dll (and tlg_dlss.dll when it is not next to the executable). Empty:
     /// <user data>/dlss, then the executable's folder. Written by Load only, read at start.
     std::string dlss_dll_dir;

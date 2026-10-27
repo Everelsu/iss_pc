@@ -19,8 +19,10 @@ static const uint32_t iss_native_heights[] = {0,1080,1440,1440,2160,1440};
 typedef struct IssNativeConfig { int output, percent, hud_edges;
 #ifdef __cplusplus
     int ui_16_9=0;
+    int temporal_mode=0;
 #else
     int ui_16_9;
+    int temporal_mode;
 #endif
 } IssNativeConfig;
 typedef struct {
@@ -36,6 +38,11 @@ static const unsigned char iss_native_projection[] = {
   0xc5,0xfa,0x2a,0x01,0xc5,0xfa,0x2a,0x08,0xb0,0x01,0xc5,0xfa,0x5e,0xc1
 };
 static const unsigned char iss_native_aspect_width[]={0x48,0x8d,0x0d,0xd3,0xc9,0x78,0x01};
+/* Temporal upscaling modes (iss_temporal_mode): the scene is the output divided by the FSR 3.1 ratio.
+ * 0 keeps iss_native_percent as the player set it (100% = temporal anti-aliasing at the output
+ * size); 1 Quality 1.5x, 2 Balanced 1.7x, 3 Performance 2.0x, 4 Ultra performance 3.0x. */
+enum { ISS_TEMPORAL_MODES = 5 };
+static const int iss_temporal_mode_percent[ISS_TEMPORAL_MODES] = {0, 67, 59, 50, 33};
 static inline int iss_native_integer(const char *s,int min,int max,int *out) {
     if (!s || !*s) return 0;
     char *end; errno=0; long n=strtol(s,&end,10);
@@ -45,7 +52,7 @@ static inline int iss_native_integer(const char *s,int min,int max,int *out) {
 /* Strict parsing: malformed native settings reject the request, not a silently
  * clamped substitute resolution. Missing keys default to off/100%/edge HUD. */
 static inline int iss_native_config(FILE *f, IssNativeConfig *c) {
-    *c=(IssNativeConfig){0,100,1,0};
+    *c=(IssNativeConfig){0,100,1,0,0};
     if (!f) return 1;
     char line[1024]; int valid=1;
     while (fgets(line,sizeof(line),f)) {
@@ -55,8 +62,16 @@ static inline int iss_native_config(FILE *f, IssNativeConfig *c) {
         if (!strncmp(line,"iss_native_percent=",19)) valid &= iss_native_integer(line+19,25,200,&c->percent);
         if (!strncmp(line,"iss_native_hud_edges=",21)) valid &= iss_native_integer(line+21,0,1,&c->hud_edges);
         if (!strncmp(line,"iss_native_ui_16_9=",19)) valid &= iss_native_integer(line+19,0,2,&c->ui_16_9);
+        if (!strncmp(line,"iss_temporal_mode=",18)) valid &= iss_native_integer(line+18,0,ISS_TEMPORAL_MODES-1,&c->temporal_mode);
     }
     return valid;
+}
+/* Folds the temporal mode into the config: the percent the mode stands for replaces iss_native_percent.
+ * Returns 1 when it did, 0 when nothing changed (mode 0, or the native output is off: the scene size
+ * is the game's own then and there is no render size to choose). */
+static inline int iss_native_apply_temporal_mode(IssNativeConfig *c,int mode) {
+    if (mode<=0 || mode>=ISS_TEMPORAL_MODES || c->output<=0) return 0;
+    c->temporal_mode=mode; c->percent=iss_temporal_mode_percent[mode]; return 1;
 }
 /* One output dimension scaled by `percent`, rounded to an even pixel count. */
 static inline uint32_t iss_native_scale(uint32_t dimension,int percent) {

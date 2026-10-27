@@ -437,6 +437,19 @@ void ImageTab() {
         CheckRow(TL("Temporal upscaler FSR 3.1 (experimental, next start)", "Upscaler temporal FSR 3.1 (experimental, próxima partida)"), s.iss_temporal,
                  TL("Replaces the game's anti-aliasing with AMD FSR 3.1 temporal. Read at start. If it cannot be created the game keeps its own anti-aliasing (see the log).",
                     "Troca o anti-aliasing do jogo pelo FSR 3.1 temporal da AMD. Lido na partida. Se não puder ser criado, o jogo mantém o anti-aliasing dele (veja o log)."));
+        static const char* const upscalers[] = {"FSR 3.1", "NVIDIA DLSS"};
+        ChoiceRow(TL("Temporal upscaler: which one (next start)", "Upscaler temporal: qual usar (próxima partida)"), s.iss_temporal_backend, upscalers, nullptr, 2,
+                  TL("FSR 3.1 works on any card. DLSS needs a GeForce RTX card, nvngx_dlss.dll and the tlg_dlss.dll bridge (the launcher's Graphics screen shows what is missing); without them FSR 3.1 is used.",
+                     "O FSR 3.1 funciona em qualquer placa. O DLSS precisa de uma GeForce RTX, do nvngx_dlss.dll e da ponte tlg_dlss.dll (a tela Gráficos do launcher mostra o que falta); sem eles o FSR 3.1 é usado."));
+        static const char* const temporal_labels[] = {TL("Native (anti-aliasing, resolution below)", "Nativo (anti-aliasing, resolução abaixo)"),
+                                                      TL("Quality (1.5x)", "Qualidade (1,5x)"), TL("Balanced (1.7x)", "Equilibrado (1,7x)"),
+                                                      TL("Performance (2x)", "Desempenho (2x)"), TL("Ultra performance (3x)", "Desempenho máximo (3x)")};
+        ImGui::BeginDisabled(!s.iss_temporal || s.iss_native_output == 0);
+        ChoiceRow(TL("Temporal upscaler: mode (next start)", "Upscaler temporal: modo (próxima partida)"), s.iss_temporal_mode, temporal_labels, nullptr, 5,
+                  s.iss_native_output == 0 ? TL("Needs an output resolution in the Native rendering tab.", "Precisa de uma resolução de saída na aba Renderização nativa.")
+                                           : TL("The game draws at the output size divided by this ratio and FSR 3.1 rebuilds the output image. Native keeps the internal resolution chosen in the Native rendering tab.",
+                                                "O jogo desenha no tamanho da saída dividido por essa razão e o FSR 3.1 reconstrói a imagem de saída. Nativo mantém a resolução interna escolhida na aba Renderização nativa."));
+        ImGui::EndDisabled();
 #endif
         ImGui::EndTable();
     }

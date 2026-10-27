@@ -66,6 +66,7 @@ def _menu(tab, key, vtype, default, name, what, **kw):
 # launcher's own Video box and not repeated here. Every menu option takes effect on the next frame.
 _CORNERS = (('0', 'Top left', 'Superior esquerdo'), ('1', 'Top right', 'Superior direito'),
             ('2', 'Bottom left', 'Inferior esquerdo'), ('3', 'Bottom right', 'Inferior direito'))
+_UPSCALERS = (('0', 'FSR 3.1', 'FSR 3.1'), ('1', 'NVIDIA DLSS', 'NVIDIA DLSS'))
 MENU = [
     _menu('Image', 'fsr1', 'bool', '0', ('Upscale with FSR 1', 'Ampliar com FSR 1'),
           ('Enlarges the game image when it is smaller than the window (spatial filter, no shimmer).',
@@ -81,6 +82,23 @@ MENU = [
            'created the game keeps its own anti-aliasing (see the log).',
            'Troca o anti-aliasing do jogo pelo FSR 3.1 temporal da AMD (renderer v2). Lido na partida. Se não puder '
            'ser criado, o jogo mantém o anti-aliasing dele (veja o log).'), live=False, tab='Image'),
+    _make('menu:iss_temporal_mode', 'menu', 'iss_temporal_mode', '', 'choice', '0',
+          ('Temporal upscaler: mode (next start)', 'Upscaler temporal: modo (próxima partida)'),
+          ('The game draws at the output size divided by this ratio and FSR 3.1 rebuilds the output image. Native keeps '
+           'the internal resolution chosen under Output. Needs an output resolution.',
+           'O jogo desenha no tamanho da saída dividido por essa razão e o FSR 3.1 reconstrói a imagem de saída. Nativo '
+           'mantém a resolução interna escolhida em Saída. Precisa de uma resolução de saída.'),
+          choices=(('0', 'Native (anti-aliasing, resolution below)', 'Nativo (anti-aliasing, resolução abaixo)'),
+                   ('1', 'Quality (1.5x)', 'Qualidade (1,5x)'), ('2', 'Balanced (1.7x)', 'Equilibrado (1,7x)'),
+                   ('3', 'Performance (2x)', 'Desempenho (2x)'), ('4', 'Ultra performance (3x)', 'Desempenho máximo (3x)')),
+          live=False, tab='Image'),
+    _make('menu:iss_temporal_backend', 'menu', 'iss_temporal_backend', '', 'choice', '0',
+          ('Temporal upscaler: which one (next start)', 'Upscaler temporal: qual usar (próxima partida)'),
+          ('FSR 3.1 works on any card. NVIDIA DLSS needs a GeForce RTX card plus nvngx_dlss.dll and the tlg_dlss.dll '
+           'bridge (Graphics screen shows what is missing); without them FSR 3.1 is used. Read at start.',
+           'O FSR 3.1 funciona em qualquer placa. O DLSS da NVIDIA precisa de uma GeForce RTX, do nvngx_dlss.dll e da '
+           'ponte tlg_dlss.dll (a tela Gráficos mostra o que falta); sem eles o FSR 3.1 é usado. Lido na partida.'),
+          choices=_UPSCALERS, live=False, tab='Image'),
     # Draw distance (gpu/shim/tlg_view.h): the in-game menu's sliders; the same ranges.
     _menu('View', 'lod_scale', 'float', '1', ('LOD distance', 'Distância do LOD'),
           ('How far objects keep their detailed models (every LOD band). Above 1x costs CPU and GPU; '

@@ -34,7 +34,7 @@ SWITCH_CHOICES = {'TLG_RENDERER': ('1', '2', 'gfx_renderer_v2')}
 SECTIONS = (
     ('nat_section', ('n:output', 'n:internal')),
     ('gfx_sec_renderer', ('TLG_RENDERER', 'TLG_NATIVE_PASSES')),
-    ('gfx_sec_image', ('s:display_mode', 's:vsync', 'menu:fsr1', 'menu:rcas', 'menu:rcas_strength', 'menu:iss_temporal',
+    ('gfx_sec_image', ('s:display_mode', 's:vsync', 'menu:fsr1', 'menu:rcas', 'menu:rcas_strength', 'menu:iss_temporal', 'menu:iss_temporal_mode',
                         'TLG_BARRIER_MERGE')),
     ('gfx_sec_rate', ('menu:fps_limit', 'menu:frames_queued')),
     ('gfx_sec_view', tuple(i.id for i in backports_table.MENU if i.tab == 'View' and not i.hidden)),

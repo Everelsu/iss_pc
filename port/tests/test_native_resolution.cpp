@@ -69,6 +69,18 @@ int main(int argc,char** argv){
     FILE* f=tmpfile();assert(f);fputs("iss_native_output=5\niss_native_percent=100\niss_native_hud_edges=0\n",f);rewind(f);
     IssNativeConfig c;assert(iss_native_config(f,&c) && c.output==5 && c.percent==100 && c.hud_edges==0);fclose(f);
     f=tmpfile();assert(f);fputs("iss_native_output=3\niss_native_percent=100oops\n",f);rewind(f);assert(!iss_native_config(f,&c));fclose(f);
+    // Temporal modes: 1080p output at 1.5x, 1.7x, 2x and 3x is 720p, 636p, 540p and 360p of scene
+    f=tmpfile();assert(f);fputs("iss_native_output=1\niss_temporal_mode=3\n",f);rewind(f);
+    assert(iss_native_config(f,&c) && c.temporal_mode==3 && c.percent==100);fclose(f);
+    assert(iss_native_apply_temporal_mode(&c,3) && c.percent==50);
+    assert(iss_native_plan(c,&p) && p.width==960 && p.height==540);
+    const int mode_scene[4][3]={{1,67,724},{2,59,638},{3,50,540},{4,33,356}};
+    for(auto& m:mode_scene){c={1,100,1};assert(iss_native_apply_temporal_mode(&c,m[0]) && c.percent==m[1]);
+        assert(iss_native_plan(c,&p) && int(p.height)==m[2]);}
+    c={0,100,1};assert(!iss_native_apply_temporal_mode(&c,2) && c.percent==100);   // no native output
+    c={1,80,1};assert(!iss_native_apply_temporal_mode(&c,0) && c.percent==80);     // mode 0 leaves the percent
+    assert(!iss_native_apply_temporal_mode(&c,5));
+    f=tmpfile();assert(f);fputs("iss_temporal_mode=5\n",f);rewind(f);assert(!iss_native_config(f,&c));fclose(f);
     std::vector<unsigned char> image;fixture(image);const auto original=image;
     // Each instruction byte is independently corrupted. Even the last lighting
     // descriptor must refuse before a single dimension or HUD byte is changed.

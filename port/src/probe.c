@@ -872,6 +872,17 @@ static void install_iss_native_resolution(const char *app0,Segment *segments,uin
     FILE *f=fopen(config_path && *config_path ? config_path : "tlg.ini","r");
     IssNativeConfig config;int valid=iss_native_config(f,&config);if(f)fclose(f);
     if(!valid){runtime_native_publish(-1,"Invalid native setting; no native patch applied",NULL);return;}
+    /* The temporal mode picks the scene size (iss_temporal_mode, or TLG_ISS_TEMPORAL_MODE) when the
+     * temporal upscaler is on; the output preset must be chosen, the mode only sets the percent. */
+    if(iss_temporal_requested()){
+        int mode=config.temporal_mode;const char *env=getenv("TLG_ISS_TEMPORAL_MODE");
+        if(env && *env){int m;if(iss_native_integer(env,0,ISS_TEMPORAL_MODES-1,&m))mode=m;else printf("Temporal upscaling: TLG_ISS_TEMPORAL_MODE=%s is not 0..%d, ignored\n",env,ISS_TEMPORAL_MODES-1);}
+        if(mode>0){
+            if(iss_native_apply_temporal_mode(&config,mode))
+                printf("Temporal upscaling: mode %d renders at %d%% of the output\n",mode,config.percent);
+            else printf("Temporal upscaling: mode %d ignored, it needs a native output (iss_native_output)\n",mode);
+        }
+    }
     if(!config.output)return;
     IssNativePlan plan;
     if(!iss_native_plan(config,&plan)){

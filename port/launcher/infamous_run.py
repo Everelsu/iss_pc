@@ -766,7 +766,16 @@ def save_experimental(settings, states):
     """Writes the choices of the "Experimental fixes" window: tlg.ini keys (the game's own file)
     and the switches kept in settings.json. Shared by the Tk and Qt launchers."""
     user_dir().mkdir(parents=True, exist_ok=True)
-    backports_table.write_ini(user_dir() / 'tlg.ini', backports_table.ini_updates(states))
+    ini_path = user_dir() / 'tlg.ini'
+    updates = backports_table.ini_updates(states)
+    # A temporal mode renders below the output, so it needs a native output preset (the game ignores it
+    # otherwise): choosing a mode with the output off starts at 1080p, the player can change it under Output.
+    by_id = {i.id: i for i in backports_table.ITEMS}
+    mode = backports_table.effective(by_id['menu:iss_temporal_mode'], states)
+    if (backports_table.effective(by_id['menu:iss_temporal'], states) == '1' and mode != '0'
+            and read_ini(ini_path).get('iss_native_output', '0').strip() == '0'):
+        updates['iss_native_output'] = '1'
+    backports_table.write_ini(ini_path, updates)
     for item in backports_table.ITEMS:
         if item.store == 'launcher':  # already handled by build_env (settings.json)
             value = backports_table.effective(item, states)
