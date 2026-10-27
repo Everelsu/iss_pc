@@ -1,4 +1,5 @@
 #include "iss_karma.h"
+#include "iss_power_wheel.h"
 #include <stdatomic.h>
 #include <math.h>
 #include <stddef.h>
@@ -44,6 +45,7 @@ static int store_checked, store_error;
 static _Thread_local int inside;
 static atomic_flag working=ATOMIC_FLAG_INIT;
 void runtime_karma_load_begin(void){
+    runtime_power_wheel_load_begin();
     while(atomic_flag_test_and_set(&working))karma_yield();
     atomic_store(&ready,0);atomic_store(&requested,0);atomic_store(&selected,0);
     atomic_store(&can_reset,0);atomic_store(&shard_loaded,0);atomic_store(&shard_error,0);
@@ -201,6 +203,7 @@ static int rollback_purchases(unsigned char *a){
 }
 /* Called only on the game's own camera update thread, never from the overlay. */
 void __attribute__((ms_abi)) runtime_karma_tick(void){
+    runtime_power_wheel_tick();
     if(!image || inside)return;
     unsigned char *a=image+ISS_KARMA_ATTRIBUTES;
     float score;memcpy(&score,a+0xc0,4);

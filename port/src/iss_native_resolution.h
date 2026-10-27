@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include "iss_native_exposure.h"
 
 enum { ISS_NATIVE_PRESETS = 6, ISS_NATIVE_SITE_COUNT = 18 };
 static const uint32_t iss_native_widths[] = {0,1920,2560,3440,3840,5120};
@@ -50,9 +51,10 @@ static inline int iss_native_integer(const char *s,int min,int max,int *out) {
     *out=(int)n; return 1;
 }
 /* Strict parsing: malformed native settings reject the request, not a silently
- * clamped substitute resolution. Missing keys default to off/100%/edge HUD. */
+ * clamped substitute resolution. Missing keys default to off/100% and the
+ * corrected 16:9 menu canvas. Explicit existing choices remain respected. */
 static inline int iss_native_config(FILE *f, IssNativeConfig *c) {
-    *c=(IssNativeConfig){0,100,1,0,0};
+    *c=(IssNativeConfig){0,100,0,1,0};
     if (!f) return 1;
     char line[1024]; int valid=1;
     while (fgets(line,sizeof(line),f)) {
@@ -134,7 +136,7 @@ static inline int iss_native_pick(int output,uint32_t target_height,IssNativePic
     r->height=iss_native_scale(out_h,best);
     r->error=(int32_t)r->height-(int32_t)target_height;
     IssNativePlan plan;
-    return iss_native_plan((IssNativeConfig){output,best,1,0},&plan) ? ISS_NATIVE_PICK_OK : ISS_NATIVE_PICK_BUDGET;
+    return iss_native_plan((IssNativeConfig){output,best,1,0,0},&plan) ? ISS_NATIVE_PICK_OK : ISS_NATIVE_PICK_BUDGET;
 }
 /* The step (index into iss_native_step_heights) that a stored percent stands for on this output,
  * or -1 when the percent matches none (a hand-edited ini). */
@@ -186,6 +188,8 @@ static inline int iss_native_apply(unsigned char *image,uint64_t size,const char
                                    const char *version,IssNativeConfig config) {
     IssNativePlan plan;
     if(!image || strcmp(serial,"CUSA00223") || strcmp(version,"01.07") || !iss_native_plan(config,&plan))return 0;
+    const uint32_t exposure_entries=iss_native_exposure_entries(plan.width,plan.height);
+    if(!exposure_entries || (exposure_entries>ISS_EXPOSURE_ORIGINAL_ENTRIES&&!iss_native_exposure_guard(image,size)))return 0;
     if(size<0x58030cu+sizeof(iss_native_projection) ||
        memcmp(image+0x58030c,iss_native_projection,sizeof(iss_native_projection)) ||
        memcmp(image+0x5802e6,iss_native_aspect_width,sizeof(iss_native_aspect_width)))return 0;
@@ -195,12 +199,25 @@ static inline int iss_native_apply(unsigned char *image,uint64_t size,const char
         if(s->offset>size || s->length>size-s->offset || memcmp(image+s->offset,s->before,s->length))return 0;
     }
     for(unsigned i=0;i<ISS_NATIVE_SITE_COUNT;i++)memcpy(image+sites[i].offset,sites[i].after,sites[i].length);
+    if(exposure_entries>ISS_EXPOSURE_ORIGINAL_ENTRIES)iss_native_exposure_write(image,exposure_entries);
     return 1;
+}
+/* Private capacity-only control: increase the two already-guarded lighting
+ * immediates after native startup patching. Keep dimensions and UI unchanged.
+ * Preflight both entire instructions before either write. */
+static inline int iss_native_raise_light_capacity(unsigned char *image,size_t size,const IssNativePlan *plan,uint32_t entries){
+    if(!image||!plan||entries<plan->light_entries||entries<0x320000u||entries>0x400000u||(entries&65535u))return 0;
+    IssNativeSite sites[ISS_NATIVE_SITE_COUNT];iss_native_changes(plan,sites);
+    for(unsigned i=14;i<16;i++)if(sites[i].offset>size||sites[i].length>size-sites[i].offset||
+        memcmp(image+sites[i].offset,sites[i].after,sites[i].length))return 0;
+    iss_native_write32(image+sites[14].offset+3,entries);
+    iss_native_write32(image+sites[15].offset+2,entries);return 1;
 }
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Immutable after startup, safe for the render thread to query. */
+/* Published snapshots are copied under a short lock. The returned plan is a
+ * thread-local snapshot, valid until that thread's next plan query. */
 void runtime_native_publish(int status,const char *reason,const IssNativePlan *plan);
 int runtime_native_status(void);
 const char *runtime_native_reason(void);

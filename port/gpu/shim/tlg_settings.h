@@ -39,7 +39,7 @@ inline constexpr int kExtraPrefs = sizeof(kExtraKeys) / sizeof(kExtraKeys[0]);
 struct Values {
     // Native scene dimensions, applied once at startup; independent of output upscaling.
     std::atomic<int> iss_native_output{0}, iss_native_percent{100};
-    std::atomic<bool> iss_native_hud_edges{true};
+    std::atomic<bool> iss_native_hud_edges{false};
     /// FSR 3.1 temporal upscaling of the inFAMOUS image (renderer v2, gpu_v2/gpu/iss_temporal_upscaler.h). Read
     /// per frame; with it off the renderer behaves as before. Needs the game hooks (src/iss_temporal_hook.h).
     std::atomic<bool> iss_temporal{false};
@@ -163,16 +163,16 @@ struct Values {
     /// Extra texture LOD bias of the game's draws (vk_rasterizer.cpp), any game.
     std::atomic<float> mip_lod_bias{0.0f};
 
-    // Mouse and keyboard (src/runtime_pad.c through tlggpu_input_settings, src/mouse_stick.h):
+    // Mouse and keyboard (src/runtime_pad.c through tlggpu_input_settings; native direct aim):
     // the mouse turns the camera (right stick). Live from the menu.
     std::atomic<bool> mouse_enabled{true}, mouse_invert_y{false};
     /// Controller vibration (src/runtime_pad.c pad_vibration). Live from the menu.
     std::atomic<bool> rumble{true};
-    std::atomic<float> mouse_sensitivity{1.0f}, mouse_smoothing{0.5f}, mouse_accel{0.0f}, mouse_deadzone{0.1f};
+    std::atomic<float> mouse_sensitivity{1.0f};
     /// Keyboard and mouse button remap (TLG_KEY_MAP syntax); written by Load only, read once.
     std::string key_map;
     // Append experimental settings so established renderer field offsets stay stable.
-    std::atomic<int> iss_native_ui_16_9{0};
+    std::atomic<int> iss_native_ui_16_9{1};
     /// Upscaler behind iss_temporal (renderer v2): 0 FSR 3.1, 1 NVIDIA DLSS. DLSS needs a bridge DLL and the
     /// player's own nvngx_dlss.dll (iss_temporal_dlss.h); without them the renderer uses FSR 3.1. Read at start.
     std::atomic<int> iss_temporal_backend{0};
@@ -183,6 +183,10 @@ struct Values {
     /// Folder with the player's nvngx_dlss.dll (and tlg_dlss.dll when it is not next to the executable). Empty:
     /// <user data>/dlss, then the executable's folder. Written by Load only, read at start.
     std::string dlss_dll_dir;
+    std::atomic<bool> iss_power_switch_enabled{true};
+    std::atomic<int> iss_power_keys[4]{62,63,64,65}; // SDL F5/F6/F7/F8
+    std::atomic<bool> iss_power_instant{true};
+    std::atomic<float> iss_power_glow{2.04f};
 };
 
 Values& Get();

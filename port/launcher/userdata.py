@@ -23,7 +23,9 @@ SLOT_PREFIX = 'infamousss'
 ENV_NAMES = ('ISS_USER_DIR', 'TLG_USER_DIR')
 # What a data folder holds that is worth carrying over. The shader cache (cache/) is left out: it is
 # large and the game rebuilds it.
-MIGRATE = ('savedata', 'savedata_backups', 'tlg.ini')
+KARMA_DATA = ('karma-original', 'karma-saves-v2', 'karma-profile-names',
+              'karma-profile-archive', 'karma-backups')
+MIGRATE = ('savedata', 'savedata_backups', 'tlg.ini', *KARMA_DATA)
 
 
 # ------------------------------------------------------------------------------- pointer file
@@ -231,7 +233,7 @@ def migration_size(src):
 
 
 def migrate(src, dst):
-    """Copies saves, backups and tlg.ini from the old data folder to the new one. The old folder
+    """Copies saves, backups, Karma tracking and tlg.ini to the new data folder. The old folder
     is never touched. Items already present in `dst` are kept (not overwritten). Returns
     {'copied': [names], 'skipped': [names], 'bytes': n}; raises DataError when it cannot even start
     (same folder, no space, not writable)."""

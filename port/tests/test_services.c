@@ -25,6 +25,13 @@ int runtime_savedata_param(int32_t user, const char *dir, void *param) { (void)u
 int runtime_savedata_icon(int32_t user, const char *dir, char *out, size_t size) { (void)user; (void)dir; (void)out; (void)size; return -1; }
 uint64_t runtime_savedata_size(int32_t user, const char *dir) { (void)user; (void)dir; return 0; }
 
+static int recorded_id=-1;
+static int reset_notifications,original_resets;
+static uintptr_t reset_object;
+static void test_progress_reset(void){++reset_notifications;}
+static ABI void test_original_reset(void* object){++original_resets;reset_object=(uintptr_t)object;}
+static int32_t test_trophy_unlock(int32_t id,int32_t *platinum) { recorded_id=id;if(platinum)*platinum=-1;return 0; }
+static int32_t test_trophy_state(uint32_t *flags,uint32_t *count) { memset(flags,0,16);flags[0]=1u<<17;*count=1;return 0; }
 int main(void) {
     unsigned char param[128]={0}, result[64]={0}; /* the game zeroes the pointers it does not want */
     uint32_t value;
@@ -118,6 +125,14 @@ int main(void) {
     uint32_t flags[4]={~0u,~0u,~0u,~0u}, count=7;
     assert(trophy_unlock_state(1,1,flags,&count)==0 && !flags[0] && !flags[3] && count==0);
     assert(trophy_unlock_state(1,1,NULL,&count)==TROPHY_INVALID && trophy_release(0)==TROPHY_INVALID);
+    const IssTrophyBackend backend={test_trophy_unlock,test_trophy_state,NULL,NULL,NULL,test_progress_reset};runtime_trophy_set_backend(&backend);
+    int32_t platinum=99;assert(trophy_unlock(1,1,17,&platinum)==0 && recorded_id==17 && platinum==-1);
+    assert(trophy_unlock(0,1,3,NULL)==TROPHY_INVALID && recorded_id==17);
+    assert(trophy_unlock_state(1,1,flags,&count)==0 && flags[0]==(1u<<17) && count==1);
+    runtime_trophy_attach_reset(0x1234,(uintptr_t)test_original_reset);
+    runtime_trophy_progress_reset((void*)0x1234);assert(reset_notifications==1&&original_resets==1&&reset_object==0x1234);
+    runtime_trophy_progress_reset((void*)0x5678);assert(reset_notifications==1&&original_resets==2&&reset_object==0x5678);
+    runtime_trophy_set_backend(NULL);
 
     float ratio=0; assert(safe_area(&ratio)==0 && ratio==1.0f && safe_area(NULL)==SYSTEM_PARAMETER);
     puts("services test: ok");

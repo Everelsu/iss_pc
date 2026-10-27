@@ -13,6 +13,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <xxhash.h>
+#include "../../../src/iss_native_live.h"
+#include "../../../src/iss_native_target_policy.h"
+#include <unordered_set>
 
 #include "common/assert.h"
 #include "common/debug.h"
@@ -36,6 +39,37 @@
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
+
+static bool NativeResizeTargetFix() {
+    static const bool enabled = [] {
+        const char* p=std::getenv("ISS_NATIVE_LIVE_TARGET_FIX");
+        return iss_native_live_option(p)!=0;
+    }();
+    return enabled && runtime_native_live_enabled();
+}
+
+// Private live-resize investigation. CP-thread-local, bounded once per resize;
+// observes actual cache decisions without clearing or invalidating resources.
+static bool NativeResizeTrace(u64 key, unsigned lane) {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_NATIVE_LIVE_TARGET_TRACE");
+        return p && p[0] == '1';
+    }();
+    if (!enabled) return false;
+    const auto generation = runtime_native_live_generation();
+    if (!generation) return false;
+    struct Trace {
+        u32 generation{};
+        std::unordered_set<u64> keys[2];
+    };
+    static thread_local Trace trace;
+    if (trace.generation != generation) {
+        trace = {};
+        trace.generation = generation;
+    }
+    auto& keys = trace.keys[lane];
+    return keys.size() < 96 && keys.insert(key).second;
+}
 
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
@@ -1107,6 +1141,14 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         desc.view_info.range.base.layer = view_slice;
     }
 
+    if ((desc.type == BindingType::RenderTarget || desc.type == BindingType::DepthTarget) &&
+        NativeResizeTrace((image.image_uid << 32) ^ (u64(info.size.width) << 16) ^ info.size.height, 0)) {
+        std::fprintf(stderr, "NATIVE_RESIZE_BIND epoch=%u uid=%llu kind=%d addr=%llx requested=%ux%u resolved=%ux%u pitch=%u/%u bytes=%llu/%llu\n",
+            runtime_native_live_generation(), (unsigned long long)image.image_uid, int(desc.type),
+            (unsigned long long)info.guest_address, info.size.width, info.size.height,
+            image.info.size.width, image.info.size.height, info.pitch, image.info.pitch,
+            (unsigned long long)info.guest_size, (unsigned long long)image.info.guest_size);
+    }
     return image_id;
 }
 
@@ -1276,11 +1318,22 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 
     // Register meta data for this depth buffer (once: the image remembers it)
     if (desc.info.meta_info.htile_addr &&
-        image.info.meta_info.htile_addr != desc.info.meta_info.htile_addr) {
+        (image.info.meta_info.htile_addr != desc.info.meta_info.htile_addr ||
+         (NativeResizeTargetFix() && !surface_metas.contains(desc.info.meta_info.htile_addr)))) {
         RegisterSurfaceMeta(desc.info.meta_info.htile_addr,
                               MetaDataInfo{.type = MetaType::HTile,
                                            .clear_mask = image.info.meta_info.htile_clear_mask});
         image.info.meta_info.htile_addr = desc.info.meta_info.htile_addr;
+    }
+
+    if (NativeResizeTrace(image.image_uid, 1)) {
+        const auto it = surface_metas.find(desc.info.meta_info.htile_addr);
+        std::fprintf(stderr, "NATIVE_RESIZE_DEPTH epoch=%u uid=%llu size=%ux%u htile=%llx mask=%x initial=%x found=%d\n",
+            runtime_native_live_generation(), (unsigned long long)image.image_uid,
+            image.info.size.width, image.info.size.height,
+            (unsigned long long)desc.info.meta_info.htile_addr,
+            it == surface_metas.end() ? 0u : u32(it.value().clear_mask),
+            image.info.meta_info.htile_clear_mask, it != surface_metas.end());
     }
 
     // If there is a stencil attachment, link depth and stencil.
@@ -1300,6 +1353,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
                 cached && slot_images.is_allocated(cached->id)) {
                 const auto& stencil = slot_images[cached->id];
                 if (stencil.image_uid == cached->uid &&
+                    (!NativeResizeTargetFix() || stencil.info.size == desc.info.size) &&
                     True(stencil.flags & ImageFlagBits::Registered)) {
                     stencil_id = cached->id;
                     ++lookup_counts.stencil_hits;
@@ -1311,6 +1365,9 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
                 if (image.info.guest_address != desc.info.stencil_addr) {
                     return;
                 }
+                // axylpup/shadPS4 3a4db206: old-size planes at the same
+                // address must not override the plane for this depth image.
+                if (NativeResizeTargetFix() && image.info.size != desc.info.size) return;
                 if (image.info.pixel_format == vk::Format::eUndefined ||
                     Vulkan::LiverpoolToVK::IsFormatStencilCompatible(image.info.pixel_format)) {
                     stencil_id = image_id;
@@ -1868,6 +1925,57 @@ void TextureCache::RunGarbageCollector() {
         ++gc_tick;
     };
     gc_scheduler_ticks[gc_tick % gc_scheduler_ticks.size()] = scheduler.CurrentTick();
+
+    // GPL adaptation of axylpup/shadPS4 PurgeOldRenderSize. Run only on the
+    // owning CP thread at its existing frame boundary, never in a guest hook.
+    // Registry iteration uses this port's locked address index, not an LRU
+    // walk that recording threads might update. FreeImage defers Vulkan and
+    // recorded-job reclamation through the existing scheduler.
+    if (NativeResizeTargetFix()) {
+        struct PendingPurge {
+            const TextureCache* owner{};
+            u32 serial{}, completed{}, attempts{};
+            u32 sizes[4]{};
+        };
+        static thread_local PendingPurge purge;
+        if (purge.owner != this) { purge={}; purge.owner=this; }
+        u32 sizes[4]{};
+        const u32 serial=runtime_native_live_purge_plan(sizes);
+        if (serial && serial!=purge.serial) {
+            purge.serial=serial;purge.attempts=0;
+            std::copy(std::begin(sizes),std::end(sizes),purge.sizes);
+        }
+        if (purge.serial!=purge.completed && gc_tick && ++purge.attempts<=3000) {
+            std::scoped_lock lock{mutex};
+            const u64 since=gc_scheduler_ticks[(gc_tick-1)%gc_scheduler_ticks.size()];
+            std::vector<ImageId> stale;
+            bool new_size_seen=false;
+            for (const auto& [address,ids] : image_address_index) {
+                (void)address;
+                for (const auto id : ids) {
+                    const auto& image=slot_images[id];
+                    if (False(image.flags & ImageFlagBits::Registered)) continue;
+                    const u32 w=image.info.size.width,h=image.info.size.height;
+                    const bool used=!since || image.tick_accessed_last>=since;
+                    if (used && (image.usage.render_target||image.usage.depth_target) &&
+                        w==purge.sizes[2] && h==purge.sizes[3]) new_size_seen=true;
+                    if (iss_native_retire_target(w,h,purge.sizes,used,image.usage.vo_surface))
+                        stale.push_back(id);
+                }
+            }
+            if (new_size_seen) {
+                std::sort(stale.begin(),stale.end(),[](ImageId a,ImageId b){return a.index<b.index;});
+                stale.erase(std::unique(stale.begin(),stale.end()),stale.end());
+                for (const auto id : stale) {
+                    learned_extents.erase(slot_images[id].info.guest_address);
+                    FreeImage(id);
+                }
+                purge.completed=purge.serial;
+                std::fprintf(stderr,"NATIVE_RESIZE_PURGE serial=%u old=%ux%u new=%ux%u retired=%zu\n",
+                    purge.serial,purge.sizes[0],purge.sizes[1],purge.sizes[2],purge.sizes[3],stale.size());
+            }
+        }
+    }
 
     GarbageCollectImages();
     GarbageCollectSamplers();

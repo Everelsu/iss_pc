@@ -3,6 +3,8 @@
 
 #include "common/debug.h"
 #include "../../../src/iss_native_resolution.h"
+#include "../../../src/iss_menu_aspect.h"
+#include "../../../src/iss_power_wheel.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -763,6 +765,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     static vk::Extent2D native_last_size{};
     if(runtime_native_status()==1 && native_last_size!=image_size){
         std::fprintf(stderr,"NATIVE_GUEST_OUTPUT %ux%u (before host FSR/post-processing)\n",image_size.width,image_size.height);
+        if(const char* trace=std::getenv("ISS_NATIVE_LIGHT_TRACE");trace&&trace[0]=='1')
+            std::fprintf(stderr,"NATIVE_COLOR_FORMAT guest=%u image=%u view=%u hdr=%d srgb10=%d fsr=%d frame=%ux%u\n",
+                unsigned(attribute.attrib.pixel_format),unsigned(image.info.pixel_format),unsigned(view_info.format),int(frame->is_hdr),
+                int(attribute.attrib.pixel_format==Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb),int(fsr_settings.enable),frame->width,frame->height);
         native_last_size=image_size;
     }
 
@@ -1091,8 +1097,27 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                 ImVec2 contentArea = ImGui::GetContentRegionAvail();
                 SetExpectedGameSize((s32)contentArea.x, (s32)contentArea.y);
 
-                const auto imgRect =
-                    FitImage(game_width, game_height, (s32)contentArea.x, (s32)contentArea.y);
+                // Guarded pause presentation only. Keep guest targets,
+                // widget transforms, world projection and gameplay HUD intact.
+                static const bool pause_fit=[] {
+                    const char* p=std::getenv("ISS_EXPERIMENTAL_PAUSE_PRESENTATION");
+                    return iss_menu_presentation_option(p);
+                }();
+                static thread_local unsigned gameplay_seen=0;
+                bool fit_menu=false;
+                if(pause_fit&&runtime_native_status()==1&&!Libraries::SystemService::IsSplashVisible()){
+                    IssPowerWheelStatus status;runtime_power_wheel_status(&status);
+                    const bool paused=iss_menu_pause_gate(&gameplay_seen,status.supported,status.ready,
+                        runtime_power_wheel_gameplay());
+                    fit_menu=iss_menu_presentation_fit(game_width,game_height,paused);
+                }
+                static thread_local bool previous_fit=false;
+                if(fit_menu!=previous_fit){
+                    std::fprintf(stderr,"PAUSE_PRESENTATION centered_16_9=%d; gameplay targets unchanged\n",fit_menu);
+                    previous_fit=fit_menu;
+                }
+                const auto imgRect = FitImage(fit_menu?16:game_width,fit_menu?9:game_height,
+                    (s32)contentArea.x,(s32)contentArea.y);
                 ImVec2 offset{
                     static_cast<float>(imgRect.offset.x),
                     static_cast<float>(imgRect.offset.y),

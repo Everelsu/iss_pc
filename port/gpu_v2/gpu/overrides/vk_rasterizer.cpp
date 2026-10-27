@@ -1,5 +1,6 @@
 #include <shared_mutex>
 #include "../../../src/iss_native_resolution.h"
+#include "../../../src/iss_warning_budget.h"
 #include <algorithm>
 #include "parallel.h"
 #include "native_item_identity.h"
@@ -3012,6 +3013,15 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     const auto& cs_program=DrawCsRegs();
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
     const bool feedback=WritesFeedbackRecord(cs);
+    static const bool light_dispatch_trace=[]{const char* p=std::getenv("ISS_NATIVE_LIGHT_TRACE");return p&&p[0]=='1';}();
+    if(light_dispatch_trace&&(u32(cs.pgm_hash)==0xce1675e0u||u32(cs.pgm_hash)==0xa8b68717u)){
+        const auto plan=*runtime_native_plan();
+        const u64 key=cs.pgm_hash^(u64(plan.width)<<32)^(u64(plan.height)<<16);
+        static thread_local std::unordered_set<u64> seen;
+        if(seen.size()<32&&seen.insert(key).second)
+            std::fprintf(stderr,"NATIVE_LIGHT_DISPATCH shader=%llx scene=%ux%u groups=%ux%ux%u\n",
+                (unsigned long long)cs.pgm_hash,plan.width,plan.height,cs_program.dim_x,cs_program.dim_y,cs_program.dim_z);
+    }
     if(!feedback)SubmitFeedbackBatch(scheduler);
     if (ExecuteShaderHLE(cs, DrawRegs(), cs_program, *this)) {
         if (g_dump.frames_left != 0) [[unlikely]] {
@@ -3104,6 +3114,37 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     iss::feedback_join::Recorded();
     Sched().ProfileDispatchEnd();
     DebugState.IncDispatch();
+
+    // Private, one-shot exposure investigation. Use the existing scheduler-
+    // synchronized readback helpers after this dispatch, outside cache locks.
+    // Never change shader output, exposure, brightness, or game state.
+    static const bool exposure_capture=[] {
+        const char* p=std::getenv("ISS_NATIVE_EXPOSURE_CAPTURE");return p&&p[0]=='1';
+    }();
+    if(exposure_capture&&u32(cs.pgm_hash)==0xa8b68717u&&!OnDrawWorker()&&
+        !OnComputeRecordQueue()&&!ComputeBindingsActive()&&DrawQueue()==0){
+        static unsigned seen_exposure;static bool captured;
+        if(!captured&&++seen_exposure==240){
+            captured=true;const auto plan=*runtime_native_plan();
+            const std::string prefix=fmt::format("exposure_{}x{}",plan.width,plan.height);
+            std::fprintf(stderr,"NATIVE_EXPOSURE_CAPTURE begin %s after 240 metering dispatches\n",prefix.c_str());
+            unsigned index=0;
+            for(const auto& bound:bound_buffers){
+                if(bound.address&&bound.size&&bound.size<=65536)
+                    DumpBufferToFile(fmt::format("{}_b{}",prefix,index),bound.buffer,bound.offset,bound.address,bound.size);
+                ++index;
+            }
+            unsigned image_index=0;
+            for(const auto& desc:cs.images){
+                const auto tsharp=desc.GetSharp(cs);
+                const u32 width=tsharp.width+1,height=tsharp.height+1;
+                if(tsharp.Address()&&width<=3840&&height<=2160)
+                    texture_cache.DumpImageToFile(tsharp.Address(),fmt::format("{}_image{}",prefix,image_index),width,height);
+                ++image_index;
+            }
+            std::fprintf(stderr,"NATIVE_EXPOSURE_CAPTURE complete %s\n",prefix.c_str());
+        }
+    }
 
     if (g_dump.frames_left != 0) [[unlikely]] {
         DumpAfter(pipeline);
@@ -4263,23 +4304,35 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             } else {
                 const u64 size = VideoCore::ClampHugeRead(
                     memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()), desc.is_written);
+                // Bounded, opt-in investigation of native 4K lighting. Observe
+                // actual descriptor/clamp values; never substitute brightness
+                // or modify the lighting buffer, shader or resource bindings.
+                static const bool light_trace=[] {
+                    const char* p=std::getenv("ISS_NATIVE_LIGHT_TRACE");return p&&p[0]=='1';
+                }();
+                if(light_trace && ((u32(stage.pgm_hash)==0xce1675e0u && stage.hw_stage==Shader::HwStage::Compute) ||
+                    (vsharp.GetStride()==2 && vsharp.num_records>=0x320000u && vsharp.num_records<=0x800000u))){
+                    const auto plan=*runtime_native_plan();
+                    const u64 key=stage.pgm_hash ^ (u64(native_index)<<56) ^ (u64(plan.width)<<32) ^
+                        (u64(plan.height)<<16) ^ vsharp.num_records;
+                    static thread_local std::unordered_set<u64> seen;
+                    if(seen.size()<96 && seen.insert(key).second)
+                        std::fprintf(stderr,"NATIVE_LIGHT_BIND shader=%llx stage=%u slot=%u scene=%ux%u addr=%llx stride=%u records=%u requested=%llu bound=%llu write=%d\n",
+                            (unsigned long long)stage.pgm_hash,unsigned(stage.hw_stage),native_index,plan.width,plan.height,
+                            (unsigned long long)vsharp.base_address,unsigned(vsharp.GetStride()),unsigned(vsharp.num_records),
+                            (unsigned long long)vsharp.GetSize(),(unsigned long long)size,int(desc.is_written));
+                }
                 if (size != vsharp.GetSize()) {
                     // A recurring descriptor can otherwise emit a warning per draw.
                     // Preserve the clamp and report the first occurrence plus
                     // exponentially spaced repeats, with bounded per-thread storage.
-                    struct ClampWarning { u64 hash{}, requested{}, clamped{}, count{}; };
-                    static thread_local std::array<ClampWarning, 64> warnings{};
+                    static thread_local IssWarningBudget warnings{};
                     static const bool log_all = [] {
                         const char* value = std::getenv("ISS_BUFFER_CLAMP_LOG_ALL");
                         return value && value[0] == '1';
                     }();
-                    auto& warning = warnings[(stage.pgm_hash ^ vsharp.GetSize() ^ size) % warnings.size()];
-                    if (warning.hash != stage.pgm_hash || warning.requested != vsharp.GetSize() ||
-                        warning.clamped != size) {
-                        warning = {stage.pgm_hash, vsharp.GetSize(), size, 0};
-                    }
-                    const u64 count = ++warning.count;
-                    if (log_all || (count & (count - 1)) == 0) {
+                    const u64 count = iss_warning_note(&warnings,stage.pgm_hash);
+                    if (log_all || iss_warning_report(count)) {
                         LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x} (repeat {})",
                                   vsharp.GetSize(), size, stage.pgm_hash, count);
                     }
@@ -4585,11 +4638,26 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
+            const u32 original_width=image->info.size.width,original_height=image->info.size.height;
+            bool depth_redirect=false;
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                 // If this image has an associated depth image, it's a stencil attachment.
                 // Redirect the access to the actual depth-stencil buffer.
                 image_id = depth_image_id;
                 image = &texture_cache.GetImage(image_id);
+                depth_redirect=true;
+            }
+            static const bool light_image_trace=[]{const char* p=std::getenv("ISS_NATIVE_LIGHT_TRACE");return p&&p[0]=='1';}();
+            if(light_image_trace&&(depth_redirect||u32(stage.pgm_hash)==0xce1675e0u||u32(stage.pgm_hash)==0xa8b68717u)){
+                const auto plan=*runtime_native_plan();
+                const u64 key=stage.pgm_hash^(u64(desc_index)<<56)^(u64(plan.width)<<32)^(u64(plan.height)<<16)^image->image_uid;
+                static thread_local std::unordered_set<u64> seen;
+                if(seen.size()<192&&seen.insert(key).second)
+                    std::fprintf(stderr,"NATIVE_LIGHT_IMAGE shader=%llx slot=%u scene=%ux%u requested=%ux%u cached=%ux%u actual=%ux%u redirect=%d kind=%u format=%u uid=%llu\n",
+                        (unsigned long long)stage.pgm_hash,desc_index,plan.width,plan.height,
+                        desc.info.size.width,desc.info.size.height,original_width,original_height,
+                        image->info.size.width,image->info.size.height,int(depth_redirect),unsigned(desc.type),unsigned(image->info.pixel_format),
+                        (unsigned long long)image->image_uid);
             }
             if (image->binding.is_bound) {
                 // The image is already bound. In case if it is about to be used as storage we
