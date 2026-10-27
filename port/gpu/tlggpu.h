@@ -81,6 +81,10 @@ typedef struct { uint64_t submitted, shown, presented, vblanks, faults_in_progre
 void tlggpu_frame_counters(TlgGpuFrameCounters *out);
 /* Draws recorded so far (gameplay detection for scripted routes, src/runtime_pad.c). */
 uint64_t tlggpu_total_draws(void);
+/* 1 when the renderer will resolve the temporal upscaler's marker (renderer v2 with iss_temporal on and
+ * a device that can run it): the game hook may then skip the game's own anti-aliasing and emit the marker
+ * (src/iss_temporal_hook.h). 0 otherwise, always in renderer v1. Cheap, any thread. */
+int tlggpu_temporal_ready(void);
 /* The game opened a file (guest path): feeds the region trace (TLG_REGION_TRACE=1, gpu/shim/tlg_region.h). */
 void tlggpu_note_open(const char *guest_path);
 /* The mouse, gathered by the window thread while the game has it (SDL relative mode: the window

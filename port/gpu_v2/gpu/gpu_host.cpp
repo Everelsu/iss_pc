@@ -12,6 +12,7 @@
 #include <imgui.h>
 #include <SDL3/SDL.h>
 #include "iss_gpu.h"
+#include "iss_temporal.h"
 #include "tlggpu.h"
 #include "common/types.h"
 #include "core/memory.h"
@@ -149,6 +150,9 @@ extern "C" void tlggpu_frame_counters(TlgGpuFrameCounters* out) {
     *out = {};
     // Frames shown: the scripted route detects gameplay by draws per frame (src/runtime_pad.c).
     out->shown = out->presented = g_iss_presented_frames.load(std::memory_order_relaxed);
+}
+extern "C" int tlggpu_temporal_ready(void) {
+    return Vulkan::IssTemporal::Available() && TlgSettings::Get().iss_temporal ? 1 : 0;
 }
 namespace Vulkan { extern std::atomic<u64> g_iss_total_draws; }
 extern "C" uint64_t tlggpu_total_draws(void) {

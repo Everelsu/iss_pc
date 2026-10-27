@@ -52,6 +52,9 @@ namespace Vulkan {
 class GraphicsPipeline;
 class Runtime;
 struct DrawPipeState;
+namespace IssTemporal {
+class Upscaler;
+}
 
 /**
  * Guest occlusion queries counted by the GPU. The guest dumps the depth block sample counters
@@ -368,6 +371,8 @@ public:
                              const std::function<void()>& end_draw);
     void NativeGbufferInterpretedDraw(const iss::native_gbuffer::Batch& batch, bool last);
     void NativeGbufferRangeEnd(const iss::native_gbuffer::Batch* batch);
+    /// The game hook's temporal upscaler marker (gpu/iss_temporal.h): `payload` is the NOP body.
+    void IssTemporalMarker(const u32* payload, u32 dwords);
     void NativeGbufferVerifyFinish(bool complete);
     void NativeGbufferVerifyNative();
     RenderState NativeGbufferVerifyTargets(const RenderState& render);
@@ -987,6 +992,8 @@ private:
     boost::icl::interval_set<VAddr> mapped_ranges;
     Common::SharedFirstMutex mapped_ranges_mutex;
     PipelineCache pipeline_cache;
+    /// Made when the first marker arrives; declared after the caches it uses, so it goes first.
+    std::unique_ptr<IssTemporal::Upscaler> iss_temporal;
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 

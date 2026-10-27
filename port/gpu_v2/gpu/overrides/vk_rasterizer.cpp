@@ -53,6 +53,8 @@ namespace iss::diagnostics {void RecordFeedbackBinding(u64 address,u64 size,u64 
 #include "common/perf_stats.h"
 #include "runtime_timeline.h"
 #include "compute_phase.h"
+#include "iss_temporal.h"
+#include "tlg_settings.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -717,6 +719,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()},
       occlusion{instance, scheduler} {
+    IssTemporal::Probe(instance);
     if (const char* value = std::getenv("ISS_CP_SPLIT_PREPARE_SERIAL");
         value && value[0] == '1') {
         // Exercise the thread-local queue selection and owner scratch on the existing
@@ -6178,6 +6181,20 @@ void Rasterizer::UpdateColorBlendingState(const GraphicsPipeline* pipeline) cons
     dynamic_state.SetBlendConstants(regs.blend_constants);
     dynamic_state.SetColorWriteMasks(pipeline->GetGraphicsKey().write_masks);
     dynamic_state.SetAttachmentFeedbackLoopEnabled(attachment_feedback_loop);
+}
+
+void Rasterizer::IssTemporalMarker(const u32* payload, u32 dwords) {
+    if (!TlgSettings::Get().iss_temporal || !IssTemporal::Available()) {
+        return;
+    }
+    // The marker stands where the game's anti-aliasing would have been recorded: everything before
+    // it is recorded first, and the images change under the cached bindings.
+    BumpBindEpoch();
+    DrainDrawPipe(5);
+    if (!iss_temporal) {
+        iss_temporal = std::make_unique<IssTemporal::Upscaler>(instance, scheduler, runtime, texture_cache);
+    }
+    iss_temporal->OnMarker(payload, dwords);
 }
 
 void Rasterizer::ScopeMarkerBegin(const std::string_view& str, bool from_guest) {

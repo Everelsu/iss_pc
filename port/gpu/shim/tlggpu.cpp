@@ -429,6 +429,10 @@ extern "C" void tlggpu_frame_counters(TlgGpuFrameCounters* out) {
     out->faults_handled = TlgFreeze::faults_handled.load(std::memory_order_relaxed);
 }
 
+extern "C" int tlggpu_temporal_ready(void) {
+    return 0; // renderer v1 has no marker handler for the game's anti-aliasing (renderer v2 only)
+}
+
 extern "C" uint64_t tlggpu_total_draws(void) {
     return TlgStats::draws.load(std::memory_order_relaxed);
 }

@@ -35,6 +35,7 @@
 #include "g4_record_ownership.h"
 #include "native_item_identity.h"
 #include "native_shadow.h"
+#include "iss_temporal_math.h"
 #include "native_gbuffer.h"
 #include "native_passes.h"
 #include "pause_guard.h"
@@ -1921,6 +1922,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::Nop: {
                 const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
                 if (nop->header.count.Value() == 0) {
+                    break;
+                }
+                // The game hook's marker where the game's own anti-aliasing would have run: the
+                // temporal upscaler takes its place (gpu/iss_temporal.h). The payload is the marker
+                // body, the magic included.
+                if ((nop->data_block[0] & Vulkan::IssTemporal::kMarkerMask) == Vulkan::IssTemporal::kMarker) {
+                    if (rasterizer) {
+                        rasterizer->IssTemporalMarker(&nop->data_block[0], nop->header.count.Value() + 1);
+                    }
                     break;
                 }
                 // An engine shadow batch (native_shadow.h): recorded from the batch and jumped
