@@ -14,8 +14,11 @@
 #include "actor_hook.h"
 #include "damage_hook.h"
 #include "view_hook.h"
+#include "iss_temporal_hook.h"
 #include "iss_camera_hook.h"
 #include "iss_mouse_aim.h"
+#include "iss_trophies.h"
+#include "trophy_query_hook.h"
 #include "iss_camera_pitch_hook.h"
 #include "gpu/tlggpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
@@ -41,6 +44,7 @@ typedef struct { uint64_t target, kind, value, addend; } Reloc;
 static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
+static unsigned char *native_live_cells;
 static size_t page_size;
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
@@ -709,7 +713,9 @@ static void install_stat_multipliers(const char *app0, Segment *segments, uint64
 }
 extern uintptr_t tlg_view_region_params(void);
 extern uintptr_t tlg_view_fade_inverse(void);
+extern uintptr_t tlg_view_floor_address(void);
 extern void tlg_view_attach(unsigned char *guest_image);
+extern void tlg_view_start(void);
 
 /* Draw distance, LOD and clip planes (src/view_hook.h): the menu's values reach the game's data
  * through tlg_view_attach; the regions' LOD_ADJUST and FADE_DISTANCE go through four stubs. */
@@ -717,7 +723,10 @@ static void install_view_tuning(Segment *segments, uint64_t count, uint64_t size
     if (!mapped(segments, count, TLG_VIEW_LOD_TABLE, TLG_VIEW_LOD_ROWS * TLG_VIEW_LOD_STRIDE) ||
         !mapped(segments, count, TLG_VIEW_BANDS, 4 * TLG_VIEW_BAND_COUNT) ||
         !mapped(segments, count, TLG_VIEW_NEAR_CLIP, 8) ||
+        size < TLG_VIEW_LEVEL + 4 || /* the level word is in the bss: inside the image, past the file-backed segments */
+        !mapped(segments, count, tlg_view_budget_at[0], tlg_view_budget_at[TLG_VIEW_BUDGET_SITES - 1] + 4 - tlg_view_budget_at[0]) ||
         !mapped(segments, count, tlg_view_region_sites[1], sizeof(tlg_view_region_code)) ||
+        !mapped(segments, count, TLG_VIEW_LOWER_SITE, TLG_VIEW_LOWER_LENGTH) ||
         !tlg_view_signature_match(image, size)) {
         return; /* another game or build: silent, like the other hooks of other games */
     }
@@ -737,17 +746,81 @@ static void install_view_tuning(Segment *segments, uint64_t count, uint64_t size
             else tlg_view_build_fade_stub(stub, tlg_view_fade_inverse(), resume);
         }
     }
+    /* Quality floor (view_hook.h): the stub that stops the game from lowering its dynamic quality level
+     * under the floor. Optional: without it the floor still raises the level, only not for long. */
+    unsigned char *lower_stub = stubs + 4 * 128;
+    const int64_t lower_delta = (int64_t)(uintptr_t)lower_stub - (int64_t)(uintptr_t)(image + TLG_VIEW_LOWER_SITE + 5);
+    const int lower = tlg_view_lower_signature(image, size) && lower_delta >= INT32_MIN && lower_delta <= INT32_MAX;
+    if (lower)
+        tlg_view_build_lower_stub(lower_stub, tlg_view_floor_address(),
+                                  (uintptr_t)(image + TLG_VIEW_LOWER_SITE + TLG_VIEW_LOWER_LENGTH));
     protect(stubs, page_size, 5);
     for (unsigned kind = 0; kind < 2; ++kind)
         for (unsigned i = 0; i < 2; ++i)
             install_jump(sites[kind][i], TLG_VIEW_SITE_LENGTH, stubs + (kind * 2 + i) * 128);
+    if (lower) install_jump(TLG_VIEW_LOWER_SITE, TLG_VIEW_LOWER_LENGTH, lower_stub);
+    else puts("Quality floor: unavailable (code differs)");
     tlg_view_attach(image);
     printf("Draw distance: ready (LOD scale, LOD bands, region LOD_ADJUST and FADE_DISTANCE, near/far clip)\n");
 }
 
+/* Temporal upscaling, game side (src/iss_temporal.h, iss_temporal_hook.h). Off unless
+ * iss_temporal=1 in tlg.ini (or TLG_ISS_TEMPORAL=1); then the image keeps its bytes. */
+static int iss_temporal_requested(void) {
+    const char *env = getenv("TLG_ISS_TEMPORAL");
+    if (env && *env) return env[0] == '1' && !env[1];
+    const char *config_path = getenv("TLG_CONFIG");
+    FILE *f = fopen(config_path && *config_path ? config_path : "tlg.ini", "r");
+    if (!f) return 0;
+    char line[1024];
+    int on = 0;
+    while (fgets(line, sizeof(line), f))
+        if (!strncmp(line, "iss_temporal=", 13)) on = line[13] == '1' && (line[14] == 0 || line[14] == '\r' || line[14] == '\n');
+    fclose(f);
+    return on;
+}
+static void install_iss_temporal(const char *app0, Segment *segments, uint64_t count, uint64_t size) {
+    if (!iss_temporal_requested()) return;
+    char path[4096], serial[32] = "", version[32] = "";
+    snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
+    sfo_value(path, "TITLE_ID", serial, sizeof(serial), NULL);
+    sfo_value(path, "APP_VER", version, sizeof(version), NULL);
+    if (strcmp(serial, "CUSA00223") || strcmp(version, "01.07")) {
+        printf("Temporal upscaling: unavailable (title '%s', version '%s'; needs CUSA00223 01.07)\n", serial, version);
+        return;
+    }
+    if (!mapped(segments, count, ISS_TEMPORAL_JITTER_SITE, ISS_TEMPORAL_JITTER_LENGTH) ||
+        !mapped(segments, count, ISS_TEMPORAL_AA_SITE, ISS_TEMPORAL_AA_LENGTH) ||
+        !mapped(segments, count, ISS_TEMPORAL_DONE_SITE, ISS_TEMPORAL_DONE_LENGTH)) {
+        puts("Temporal upscaling: unavailable (hook outside the executable segments)");
+        return;
+    }
+    unsigned char *stubs = allocate(page_size);
+    if (!iss_temporal_install_hooks(image, size, stubs)) {
+        puts("Temporal upscaling: unavailable (code differs, or the stubs are out of reach of the image)");
+        return;
+    }
+    protect(stubs, page_size, 5);
+    puts("Temporal upscaling: game hooks ready (they run the game's own code until the renderer reports ready)");
+}
+/* The renderer's side of src/iss_temporal.h. */
+int iss_temporal_installed(void) { return iss_temporal_state.installed; }
+void iss_temporal_set_renderer_ready(int ready) {
+    iss_temporal_state.ready = ready ? 1 : 0;
+    iss_temporal_update_active();
+}
+void iss_temporal_set_phases(uint32_t phases) {
+    iss_temporal_state.phases = phases < 1 ? 1 : phases > ISS_TEMPORAL_MAX_PHASES ? ISS_TEMPORAL_MAX_PHASES : phases;
+}
+uint32_t iss_temporal_latest_seq(void) { return iss_temporal_state.seq; }
+int iss_temporal_get_frame(uint32_t seq, IssTemporalFrame *out) { return iss_temporal_copy_frame(seq, out); }
+
 #include "iss_karma.h"
+#include "iss_power_wheel.h"
 #include "iss_karma_signatures.h"
 #include "iss_native_resolution.h"
+#include "iss_native_live.h"
+#include "iss_native_aspect.h"
 #include "iss_hud_trace.h"
 #include "iss_hud_corners.h"
 static void install_iss_hud_corners(const char *app0,Segment *segments,uint64_t count,uint64_t size){
@@ -800,11 +873,74 @@ static void install_iss_hud_trace(const char *app0,Segment *segments,uint64_t co
     iss_karma_jump(image+ISS_HUD_TRACE_SITE,(uintptr_t)bridge);
     puts("HUD layout observer: guarded US 1.07 hook active; widget values unchanged");
 }
+static void install_iss_native_live_trace(const char *app0,Segment *segments,uint64_t count,uint64_t size){
+    const char *option=getenv("ISS_NATIVE_LIVE_TRACE"),*live_resize=getenv("ISS_NATIVE_LIVE_RESIZE");
+    const int trace_requested=option&&!strcmp(option,"1");
+    if(!trace_requested&&runtime_native_status()!=1)return;
+    if(!trace_requested&&!iss_native_live_option(live_resize))return;
+    char path[4096],title[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0?app0:".");
+    sfo_value(path,"TITLE_ID",title,sizeof(title),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    const uint32_t sites[]={ISS_NATIVE_FRAME_SITE,ISS_NATIVE_TARGET_SITE,ISS_NATIVE_SAFE_SITE,ISS_NATIVE_DIM_SITE};
+    const unsigned lengths[]={ISS_NATIVE_FRAME_STOLEN,ISS_NATIVE_TARGET_STOLEN,ISS_NATIVE_SAFE_STOLEN,ISS_NATIVE_DIM_STOLEN};
+    int valid=iss_native_live_signature(image,size,title,version);
+    for(unsigned k=0;k<4;k++){
+        int executable=0;for(uint64_t i=0;i<count;i++)if((segments[i].flags&1)&&sites[k]>=segments[i].address&&
+            sites[k]-segments[i].address<=segments[i].size&&lengths[k]<=segments[i].size-(sites[k]-segments[i].address))executable=1;
+        valid&=executable;
+    }
+    if(!valid){puts("Native live observer: incompatible code; no hooks installed");return;}
+    uintptr_t helpers[]={(uintptr_t)runtime_native_frame_observer,(uintptr_t)runtime_native_target_observer,(uintptr_t)runtime_native_safe_resize,(uintptr_t)runtime_native_dimension_resize};
+    unsigned char *bridges[4];
+    for(unsigned k=0;k<4;k++){
+        bridges[k]=allocate(page_size);unsigned n=iss_karma_bridge_ex(bridges[k],helpers[k],image+sites[k],(uintptr_t)image+sites[k]+lengths[k],lengths[k],k==3?6:k==2?5:1);
+        if(n>page_size)fail("Native observer bridge overflow");
+        protect(bridges[k],page_size,5);
+    }
+    runtime_native_live_attach((uintptr_t)image);
+    if(native_live_cells&&runtime_native_status()==1){
+        IssNativePlan startup=*runtime_native_plan();
+        if(startup.ui_16_9==1&&iss_native_live_projection_redirect(image,size,&startup,(uintptr_t)native_live_cells)){
+            runtime_native_live_enable((uint32_t*)native_live_cells,&startup);
+            printf("Native live resize: guarded mutable projection cells; allocation ceiling %ux%u / %u lighting entries\n",startup.width,startup.height,startup.light_entries);
+        }else puts("Native live resize: projection/UI check failed; startup dimensions retained");
+    }
+    for(unsigned k=0;k<4;k++){memset(image+sites[k],0x90,lengths[k]);iss_karma_jump(image+sites[k],(uintptr_t)bridges[k]);}
+    const char *aspect=getenv("ISS_NATIVE_LIVE_ASPECT");
+    if(iss_native_live_option(aspect)&&runtime_native_live_enabled()){
+        int executable=0;
+        for(uint64_t i=0;i<count;i++)if((segments[i].flags&1)&&ISS_NATIVE_ASPECT_SITE>=segments[i].address&&
+            ISS_NATIVE_ASPECT_SITE-segments[i].address<=segments[i].size&&
+            ISS_NATIVE_ASPECT_STOLEN<=segments[i].size-(ISS_NATIVE_ASPECT_SITE-segments[i].address))executable=1;
+        if(executable&&iss_native_aspect_signature(image,size)){
+            unsigned char *bridge=allocate(page_size);
+            unsigned n=iss_karma_bridge_ex(bridge,(uintptr_t)runtime_native_live_aspect_camera,image+ISS_NATIVE_ASPECT_SITE,
+                (uintptr_t)image+ISS_NATIVE_ASPECT_SITE+ISS_NATIVE_ASPECT_STOLEN,ISS_NATIVE_ASPECT_STOLEN,1);
+            if(n>page_size)fail("Native aspect bridge overflow");
+            protect(bridge,page_size,5);
+            memset(image+ISS_NATIVE_ASPECT_SITE,0x90,ISS_NATIVE_ASPECT_STOLEN);
+            iss_karma_jump(image+ISS_NATIVE_ASPECT_SITE,(uintptr_t)bridge);
+            runtime_native_live_aspect_enable();puts("Native live aspect: guarded main-camera projection refresh enabled");
+        }else puts("Native live aspect: code check failed; different aspect ratios require restarting");
+    }
+    puts("Native live observer: verified frame/target hooks active; dimensions unchanged");
+}
 static void install_iss_native_resolution(const char *app0,Segment *segments,uint64_t count,uint64_t size) {
     const char *config_path=getenv("TLG_CONFIG");
     FILE *f=fopen(config_path && *config_path ? config_path : "tlg.ini","r");
     IssNativeConfig config;int valid=iss_native_config(f,&config);if(f)fclose(f);
     if(!valid){runtime_native_publish(-1,"Invalid native setting; no native patch applied",NULL);return;}
+    /* The temporal mode picks the scene size (iss_temporal_mode, or TLG_ISS_TEMPORAL_MODE) when the
+     * temporal upscaler is on; the output preset must be chosen, the mode only sets the percent. */
+    if(iss_temporal_requested()){
+        int mode=config.temporal_mode;const char *env=getenv("TLG_ISS_TEMPORAL_MODE");
+        if(env && *env){int m;if(iss_native_integer(env,0,ISS_TEMPORAL_MODES-1,&m))mode=m;else printf("Temporal upscaling: TLG_ISS_TEMPORAL_MODE=%s is not 0..%d, ignored\n",env,ISS_TEMPORAL_MODES-1);}
+        if(mode>0){
+            if(iss_native_apply_temporal_mode(&config,mode))
+                printf("Temporal upscaling: mode %d renders at %d%% of the output\n",mode,config.percent);
+            else printf("Temporal upscaling: mode %d ignored, it needs a native output (iss_native_output)\n",mode);
+        }
+    }
     if(!config.output)return;
     IssNativePlan plan;
     if(!iss_native_plan(config,&plan)){
@@ -814,9 +950,11 @@ static void install_iss_native_resolution(const char *app0,Segment *segments,uin
     char path[4096],serial[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
     sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
-    for(unsigned s=0;s<ISS_NATIVE_SITE_COUNT+2;s++) {
+    const int grow_exposure=iss_native_exposure_entries(plan.width,plan.height)>ISS_EXPOSURE_ORIGINAL_ENTRIES;
+    for(unsigned s=0;s<ISS_NATIVE_SITE_COUNT+2+(grow_exposure?ISS_EXPOSURE_SITE_COUNT:0);s++) {
         uint32_t at=s<ISS_NATIVE_SITE_COUNT ? iss_native_sites[s].offset : s==ISS_NATIVE_SITE_COUNT ? 0x58030c : 0x5802e6;
         unsigned length=s<ISS_NATIVE_SITE_COUNT ? iss_native_sites[s].length : s==ISS_NATIVE_SITE_COUNT ? sizeof(iss_native_projection) : sizeof(iss_native_aspect_width);
+        if(s>=ISS_NATIVE_SITE_COUNT+2){at=iss_exposure_sites[s-ISS_NATIVE_SITE_COUNT-2].offset;length=5;}
         int executable=0;
         for(uint64_t i=0;i<count;i++)if((segments[i].flags&1) && at>=segments[i].address &&
             at-segments[i].address<=segments[i].size && length<=segments[i].size-(at-segments[i].address))executable=1;
@@ -826,7 +964,19 @@ static void install_iss_native_resolution(const char *app0,Segment *segments,uin
         runtime_native_publish(-1,"US 1.07 code check failed or another resolution patch conflicts; no native writes",NULL);
         printf("Native rendering: refused title=%s version=%s (signature/segment mismatch); no writes\n",serial,version);return;
     }
+    const char *capacity_test=getenv("ISS_NATIVE_LIGHT_CAPACITY_TEST");
+    if(capacity_test){
+        int entries=0;
+        if(iss_native_integer(capacity_test,0x320000,0x400000,&entries)&&
+            iss_native_raise_light_capacity(image,size,&plan,(uint32_t)entries)){
+            plan.light_entries=(uint32_t)entries;
+            printf("Native lighting capacity-only test: %u entries; scene remains %ux%u\n",plan.light_entries,plan.width,plan.height);
+        }else puts("Native lighting capacity-only test: override refused; verified native plan retained");
+    }
     runtime_native_publish(1,"Experimental native startup rendering active",&plan);
+    printf("Native exposure metering: required=%u floats, ping-pong capacity=%u floats (%u bytes each)\n",
+        ((plan.width+127)/128)*((plan.height+71)/72),iss_native_exposure_entries(plan.width,plan.height),
+        iss_native_exposure_entries(plan.width,plan.height)*4);
     printf("Native rendering: output selection %ux%u, scale %d%%, scene/output surface %ux%u, logical HUD %ux%u, light entries %u; Hor+ vertical FOV preserved\n",
         plan.output_width,plan.output_height,plan.percent,plan.width,plan.height,plan.ui_width,plan.ui_height,plan.light_entries);
 }
@@ -869,6 +1019,7 @@ static void install_iss_karma(const char *app0,Segment *segments,uint64_t count,
     iss_karma_jump(image+0x1e2270,(uintptr_t)shard_bridge);
     memset(image+ISS_KARMA_SITE,0x90,ISS_KARMA_STOLEN);
     iss_karma_jump(image+ISS_KARMA_SITE,(uintptr_t)bridge);runtime_karma_attach(image);
+    runtime_power_wheel_attach(image,size);
     puts("Karma switcher: supported CUSA00223 01.07 (normal game functions, game-thread queue)");
 }
 
@@ -903,9 +1054,34 @@ static void install_iss_camera_speed(const char *app0, Segment *segments, uint64
     printf("Camera speed: horizontal %.3gx, vertical %.3gx (angular limits; adaptive gain unchanged)\n",pan,tilt);
 }
 
+static void install_iss_trophies(const char *app0,Segment *segments,uint64_t count,uint64_t size){
+    const char *opt=getenv("ISS_TROPHIES_PER_SAVE");if(!opt||strcmp(opt,"1"))return;
+    char path[4096],title[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0?app0:".");
+    sfo_value(path,"TITLE_ID",title,sizeof(title),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    int executable=0;
+    for(uint64_t i=0;i<count;i++)if((segments[i].flags&1)&&segments[i].address<=ISS_TROPHY_QUERY_SITE&&
+        ISS_TROPHY_QUERY_SITE+sizeof(iss_trophy_query_signature)<=segments[i].address+segments[i].size)executable=1;
+    int reset_executable=0;
+    for(uint64_t i=0;i<count;i++)if((segments[i].flags&1)&&segments[i].address<=ISS_TROPHY_RESET_SITE&&
+        ISS_TROPHY_RESET_SITE+sizeof(iss_trophy_reset_signature)<=segments[i].address+segments[i].size)reset_executable=1;
+    if(!executable||!reset_executable||!iss_trophy_query_valid(image,size,title,version)||!iss_trophy_reset_valid(image,size)){
+        puts("Trophies: save-specific query disabled (title/version/code guard mismatch); no game writes");return;
+    }
+    // The verified original function only reads the platform trophy cache under
+    // its mutex. Replace that query with the save-bound backend; do not write
+    // cached guest data, story flags, or the user's save.
+    unsigned char *original_reset=allocate(page_size);
+    iss_trophy_reset_trampoline(original_reset,(uintptr_t)image);protect(original_reset,page_size,5);
+    runtime_trophy_attach_reset((uintptr_t)image+ISS_TROPHY_PROGRESS_OBJECT,(uintptr_t)original_reset);
+    iss_karma_jump(image+ISS_TROPHY_RESET_SITE,(uintptr_t)runtime_trophy_progress_reset);
+    iss_karma_jump(image+ISS_TROPHY_QUERY_SITE,(uintptr_t)runtime_trophy_query);
+    runtime_trophy_set_save_mode_ready(1);
+    puts("Trophies: guarded US 1.07 save-specific query and player-progression reset observer active");
+}
 static void install_iss_mouse_aim(const char *app0,Segment *segments,uint64_t count,uint64_t size){
-    const char *enabled=getenv("ISS_DIRECT_MOUSE_AIM");
-    if(!enabled || strcmp(enabled,"1"))return;
+    /* This build uses direct mouse aiming exclusively. Legacy launchers or
+     * inherited ISS_DIRECT_MOUSE_AIM=0 must not select stick emulation. */
     char path[4096],serial[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
     sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
@@ -918,7 +1094,7 @@ static void install_iss_mouse_aim(const char *app0,Segment *segments,uint64_t co
     }
     if(strcmp(serial,"CUSA00223") || strcmp(version,"01.07") || !executable || !writable ||
         !iss_mouse_signature(image,size)){
-        puts("Direct mouse: incompatible title/code/mapping; mouse-to-stick fallback retained");return;
+        puts("Direct mouse: incompatible title/code/mapping; mouse camera disabled; controller unchanged");return;
     }
     unsigned char *bridge=allocate(page_size);
     unsigned n=iss_karma_bridge_ex(bridge,(uintptr_t)runtime_mouse_aim_camera,image+ISS_MOUSE_SITE,
@@ -1412,7 +1588,10 @@ int main(int argc, char **argv) {
         else red_zone_area = round_page(isa_red_zone_code_size(isa_table));
         if (!red_zone_area) red_zone_on = 0;
     }
-    image = allocate(round_page(size) + stub_area + red_zone_area);
+    const char *live_option=getenv("ISS_NATIVE_LIVE_RESIZE");
+    size_t live_data_size=iss_native_live_option(live_option)?page_size:0;
+    image = allocate(round_page(size) + stub_area + red_zone_area + live_data_size);
+    if(live_data_size)native_live_cells=image+round_page(size)+stub_area+red_zone_area;
     unsigned char *stubs = image + round_page(size);
 #ifndef _WIN32
     guest_code_end = (uintptr_t)image + round_page(size) + stub_area + red_zone_area;
@@ -1507,6 +1686,7 @@ int main(int argc, char **argv) {
     if (gpu_enabled) install_actor_watch(app0, segments, ns, size);
     if (gpu_enabled) install_stat_multipliers(app0, segments, ns, size);
     if (gpu_enabled) install_view_tuning(segments, ns, size);
+    if (gpu_enabled) install_iss_temporal(app0, segments, ns, size);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
@@ -1536,11 +1716,13 @@ int main(int argc, char **argv) {
         protect(stubs, stub_area + red_zone_area, 5);
     }
     if (gpu_enabled) install_iss_native_resolution(app0, segments, ns, size);
+    if (gpu_enabled) install_iss_native_live_trace(app0, segments, ns, size);
     if (gpu_enabled) install_iss_hud_corners(app0, segments, ns, size);
     if (gpu_enabled) install_iss_hud_trace(app0, segments, ns, size);
     if (gpu_enabled) install_iss_camera_speed(app0, segments, ns, size);
     if (gpu_enabled) install_iss_pitch_safeguard(app0, segments, ns, size);
     if (gpu_enabled) install_iss_mouse_aim(app0, segments, ns, size);
+    if (gpu_enabled) install_iss_trophies(app0, segments, ns, size);
     if (gpu_enabled) install_iss_karma(app0, segments, ns, size, karma_before_runtime_rewrites);
     protect(traps, round_page((import_count + 1) * 32), 5);
     if (trace_stubs) protect(trace_stubs, round_page((import_count + 1) * TRACE_STUB_SIZE), 5);
@@ -1554,6 +1736,7 @@ int main(int argc, char **argv) {
     if (!executable_entry) fail("entry is not executable");
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
     boot_step("image mapped and relocated");
+    if (gpu_enabled) tlg_view_start(); /* its thread reads the image: only now that it is mapped again */
     if (native_libc) {
         for (uint64_t m=0;m<module_count;++m) {
             int init_executable=0;

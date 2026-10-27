@@ -199,6 +199,34 @@ Item {
                 Text { width: parent.width; text: Theme.tr("verbose_log_hint"); wrapMode: Text.WordWrap; color: Theme.textDim
                        font.family: Theme.fontText; font.pixelSize: 12; lineHeight: 1.25; lineHeightMode: Text.ProportionalHeight }
             }
+            Column {   // upscaler: Off / FSR 1 / FSR 3.1 / DLSS, and the quality of the temporal ones (next start)
+                width: parent.width; spacing: 6
+                Row {
+                    spacing: 12
+                    Text { text: Theme.tr("upscaler_label"); color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.Bold
+                           anchors.verticalCenter: parent.verticalCenter }
+                    Select {
+                        accent: page.accent; width: 262
+                        model: Backend.upscalerOptions
+                        currentIndex: Backend.upscalerIndex
+                        onActivated: (i) => Backend.setUpscaler(Backend.upscalerOptions[i].value)
+                    }
+                }
+                Row {
+                    visible: Backend.upscalerHasQuality
+                    spacing: 12
+                    Text { text: Theme.tr("upscaler_quality_label"); color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.Bold
+                           anchors.verticalCenter: parent.verticalCenter }
+                    Select {
+                        accent: page.accent; width: 262
+                        model: Backend.upscalerQualityOptions
+                        currentIndex: Backend.upscalerQualityIndex
+                        onActivated: (i) => Backend.setUpscalerQuality(Backend.upscalerQualityOptions[i].value)
+                    }
+                }
+                Text { width: parent.width; text: Theme.tr("upscaler_hint"); wrapMode: Text.WordWrap; color: Theme.textDim
+                       font.family: Theme.fontText; font.pixelSize: 12; lineHeight: 1.25; lineHeightMode: Text.ProportionalHeight }
+            }
             Item {
                 visible: Backend.showFirstRun || Backend.notice !== ""
                 width: parent.width; height: warnText.implicitHeight

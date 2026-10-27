@@ -126,6 +126,13 @@ public:
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 
+    /// The single-sample image of this size that starts exactly at `address` and has `required_usage`.
+    /// One guest address can hold several images (the same memory as a render target and as a texture of
+    /// another format, a replaced image): the most recently used one wins, so unlike FindImageFromRange
+    /// with a size of 1 the lookup does not fail when there are two. Null when none matches.
+    [[nodiscard]] ImageId FindImageAt(VAddr address, u32 width, u32 height,
+                                      vk::ImageUsageFlags required_usage = {});
+
     // C may only use this as a negative hint while preparing a packet. A NoRegisteredPage
     // result must be rechecked at the coherence commit; it does not pin the registry.
     [[nodiscard]] iss::g4::NegativeImageSnapshot ProbeNoRegisteredImage(VAddr address,

@@ -21,6 +21,7 @@
 #include "common/logging/log.h"
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
+#include "iss_temporal_dlss.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
@@ -224,6 +225,8 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
     g_iss_surface_capabilities2=std::any_of(extensions.begin(),extensions.end(),[](const char* name){
         return !std::strcmp(name,VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
     });
+    // NVIDIA DLSS (iss_temporal_backend=1 with the player's DLLs): the instance extensions NGX needs.
+    IssTemporal::Dlss::AppendInstanceExtensions(extensions);
     return extensions;
 }
 

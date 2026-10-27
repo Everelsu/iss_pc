@@ -35,6 +35,7 @@
 #include "g4_record_ownership.h"
 #include "native_item_identity.h"
 #include "native_shadow.h"
+#include "iss_temporal_math.h"
 #include "native_gbuffer.h"
 #include "native_passes.h"
 #include "pause_guard.h"
@@ -174,6 +175,7 @@ static void CommitGbufferDraw(AmdGpu::Regs& regs, const iss::native_gbuffer::Bat
 
 void IssPinCommandProcessor(); // bridge.cpp, ISS_CP_CPU
 void IssEngineMarker(const u32* payload); // vk_rasterizer.cpp, ISS_ENGINE_MARKERS
+bool IssTemporalRedirecting();           // vk_rasterizer.cpp: draws go to output-size twins (iss_temporal_upscaler.h)
 bool IssPassCostEnabled();                 // vk_rasterizer.cpp, ISS_PASS_COST
 void IssPassCostTick(u32 packet_class);
 extern u64 g_iss_dcb_lo, g_iss_dcb_hi;    // buffer_cache.cpp, ISS_OBTAIN_CENSUS
@@ -1923,6 +1925,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (nop->header.count.Value() == 0) {
                     break;
                 }
+                // The game hook's marker where the game's own anti-aliasing would have run: the
+                // temporal upscaler takes its place (gpu/iss_temporal_upscaler.h). The payload is the marker
+                // body, the magic included.
+                if ((nop->data_block[0] & Vulkan::IssTemporal::kMarkerMask) == Vulkan::IssTemporal::kMarker) {
+                    if (rasterizer) {
+                        rasterizer->IssTemporalMarker(&nop->data_block[0], nop->header.count.Value() + 1);
+                    }
+                    break;
+                }
                 // An engine shadow batch (native_shadow.h): recorded from the batch and jumped
                 // over, or interpreted (the rasterizer learns its render states).
                 if (nop->header.count.Value() == iss::native_shadow::MarkerDwords - 2 &&
@@ -1998,7 +2009,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     const ng::Batch* batch = ng::Find(marker);
                     // Pause guard: in the pause the range is interpreted (original engine path).
                     if (!batch || batch->end > dcb.data() + dcb.size() || CpSplitActive() ||
-                        iss::pause_guard::Blocked()) {
+                        iss::pause_guard::Blocked() || IssTemporalRedirecting()) {
                         ng::NoteRange(ng::Mismatch, 0);
                         break;
                     }

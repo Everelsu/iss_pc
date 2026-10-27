@@ -3,6 +3,8 @@
 
 #include "common/debug.h"
 #include "../../../src/iss_native_resolution.h"
+#include "../../../src/iss_menu_aspect.h"
+#include "../../../src/iss_power_wheel.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -16,10 +18,12 @@
 #include "core/libraries/system/systemservice.h"
 #include "core/perf_sampler.h"
 #include "imgui/friends_layer.h"
+#include "iss_temporal_upscaler.h"
 #include "imgui/invitation_prompt_layer.h"
 #include "imgui/notifications_layer.h"
 #include "imgui/renderer/imgui_core.h"
 #include "tlg_overlay.h"
+#include "tlg_settings.h"
 #include "imgui/renderer/imgui_impl_vulkan.h"
 #include "imgui/shadnet_notifications_layer.h"
 #include "sdl_window.h"
@@ -678,6 +682,10 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
 
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
+    // The draws of the frame must all be recorded before the redirection ends.
+    if (IssTemporal::Redirecting()) {
+        rasterizer->DrainDrawPipe(5);
+    }
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
     const auto image_id = texture_cache.FindImage(desc);
     texture_cache.UpdateImage(image_id);
@@ -714,7 +722,12 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         const char* value = std::getenv("ISS_PRESENT_STREAM");
         return value && value[0] == '1';
     }();
-    const bool streamed = present_stream && !fsr_settings.enable &&
+    // inFAMOUS drawn below the output size by the temporal upscaler: the frame is in an output-size image of
+    // its own (the guest's buffer holds the render-size version). Asks for it for every flip: that also ends
+    // the redirection of the draws.
+    IssTemporal::DisplayImage ui_display;
+    const bool ui_override = IssTemporal::DisplayOverride(cpu_address, ui_display);
+    const bool streamed = present_stream && !fsr_settings.enable && !ui_override &&
                           !draw_scheduler.DirectCommandBuffer();
     vk::CommandBuffer cmdbuf{};
     if (!streamed) {
@@ -732,11 +745,30 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     auto& image = texture_cache.GetImage(image_id);
     auto image_view = *image.FindView(view_info).image_view;
-    const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
+    vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
+    if (ui_override) {
+        // A copy of the output-size image in the layout the passes sample; the image itself stays in General.
+        vk::ComponentMapping ui_mapping{};
+        ui_mapping.a = vk::ComponentSwizzle::eOne;
+        const vk::ImageView ui_view = streamed ? vk::ImageView{} : IssTemporal::RecordDisplayCopy(
+            cmdbuf, ui_display, GetFrameViewFormat(attribute.attrib.pixel_format), ui_mapping);
+        if (ui_view) {
+            image_view = ui_view;
+            image_size = vk::Extent2D{ui_display.width, ui_display.height};
+        } else {
+            LOG_WARNING(Render_Vulkan, "IssTemporal: the output-size frame could not be presented, showing the guest's buffer");
+        }
+        // The twin stays alive until the commands that read it are done.
+        draw_scheduler.DeferOperation([keep = std::move(ui_display.keep)] {});
+    }
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
     static vk::Extent2D native_last_size{};
     if(runtime_native_status()==1 && native_last_size!=image_size){
         std::fprintf(stderr,"NATIVE_GUEST_OUTPUT %ux%u (before host FSR/post-processing)\n",image_size.width,image_size.height);
+        if(const char* trace=std::getenv("ISS_NATIVE_LIGHT_TRACE");trace&&trace[0]=='1')
+            std::fprintf(stderr,"NATIVE_COLOR_FORMAT guest=%u image=%u view=%u hdr=%d srgb10=%d fsr=%d frame=%ux%u\n",
+                unsigned(attribute.attrib.pixel_format),unsigned(image.info.pixel_format),unsigned(view_info.format),int(frame->is_hdr),
+                int(attribute.attrib.pixel_format==Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb),int(fsr_settings.enable),frame->width,frame->height);
         native_last_size=image_size;
     }
 
@@ -798,7 +830,6 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
                     vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
-
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
@@ -1066,8 +1097,27 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                 ImVec2 contentArea = ImGui::GetContentRegionAvail();
                 SetExpectedGameSize((s32)contentArea.x, (s32)contentArea.y);
 
-                const auto imgRect =
-                    FitImage(game_width, game_height, (s32)contentArea.x, (s32)contentArea.y);
+                // Guarded pause presentation only. Keep guest targets,
+                // widget transforms, world projection and gameplay HUD intact.
+                static const bool pause_fit=[] {
+                    const char* p=std::getenv("ISS_EXPERIMENTAL_PAUSE_PRESENTATION");
+                    return iss_menu_presentation_option(p);
+                }();
+                static thread_local unsigned gameplay_seen=0;
+                bool fit_menu=false;
+                if(pause_fit&&runtime_native_status()==1&&!Libraries::SystemService::IsSplashVisible()){
+                    IssPowerWheelStatus status;runtime_power_wheel_status(&status);
+                    const bool paused=iss_menu_pause_gate(&gameplay_seen,status.supported,status.ready,
+                        runtime_power_wheel_gameplay());
+                    fit_menu=iss_menu_presentation_fit(game_width,game_height,paused);
+                }
+                static thread_local bool previous_fit=false;
+                if(fit_menu!=previous_fit){
+                    std::fprintf(stderr,"PAUSE_PRESENTATION centered_16_9=%d; gameplay targets unchanged\n",fit_menu);
+                    previous_fit=fit_menu;
+                }
+                const auto imgRect = FitImage(fit_menu?16:game_width,fit_menu?9:game_height,
+                    (s32)contentArea.x,(s32)contentArea.y);
                 ImVec2 offset{
                     static_cast<float>(imgRect.offset.x),
                     static_cast<float>(imgRect.offset.y),

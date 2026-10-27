@@ -20,6 +20,7 @@
 #include "srt_walker_capture.h"
 #include "common/perf_stats.h"
 #include "common/recursive_lock.h"
+#include "iss_temporal_math.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
@@ -52,6 +53,9 @@ namespace Vulkan {
 class GraphicsPipeline;
 class Runtime;
 struct DrawPipeState;
+namespace IssTemporal {
+class Upscaler;
+}
 
 /**
  * Guest occlusion queries counted by the GPU. The guest dumps the depth block sample counters
@@ -368,6 +372,8 @@ public:
                              const std::function<void()>& end_draw);
     void NativeGbufferInterpretedDraw(const iss::native_gbuffer::Batch& batch, bool last);
     void NativeGbufferRangeEnd(const iss::native_gbuffer::Batch* batch);
+    /// The game hook's temporal upscaler marker (gpu/iss_temporal_upscaler.h): `payload` is the NOP body.
+    void IssTemporalMarker(const u32* payload, u32 dwords);
     void NativeGbufferVerifyFinish(bool complete);
     void NativeGbufferVerifyNative();
     RenderState NativeGbufferVerifyTargets(const RenderState& render);
@@ -987,6 +993,19 @@ private:
     boost::icl::interval_set<VAddr> mapped_ranges;
     Common::SharedFirstMutex mapped_ranges_mutex;
     PipelineCache pipeline_cache;
+    /// Made when the first marker arrives; declared after the caches it uses, so it goes first.
+    std::unique_ptr<IssTemporal::Upscaler> iss_temporal;
+    IssTemporal::DepthTargets iss_depth_targets;
+    /// Output size over render size while the draws go to the upscaler's output-size twins (1 otherwise); set by
+    /// BeginRendering, used by the viewport, the scissor and the push constants of the same draw.
+    float iss_ui_scale_x = 1.0f, iss_ui_scale_y = 1.0f;
+    /// Extra texture LOD bias of the draw being bound (the scene's G-buffer pass while rendering below the output).
+    float iss_sampler_lod_bias = 0.0f;
+    /// The render state of the last redirected draw: a change of it (or a texture read of a twin) needs a barrier.
+    RenderState iss_ui_last_state{};
+    bool iss_ui_last_valid = false;
+    /// The push constants of a redirected draw: screen-space positions in output pixels.
+    void IssUiScalePushData();
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 

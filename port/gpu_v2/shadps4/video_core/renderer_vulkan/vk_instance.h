@@ -62,6 +62,15 @@ public:
         return physical_devices;
     }
 
+    /// The device was created with shaderStorageImageWriteWithoutFormat (FSR 3 needs it).
+    bool IsStorageImageWriteWithoutFormatEnabled() const {
+        return features.shaderStorageImageWriteWithoutFormat;
+    }
+
+    bool IsSubgroupSizeControlEnabled() const {
+        return vk13_features.subgroupSizeControl;
+    }
+
     /// Retrieve queue information
     u32 GetGraphicsQueueFamilyIndex() const {
         return queue_family_index;

@@ -7,7 +7,7 @@
  *   Enter Options, Tab left touchpad (photo mode), Backspace right touchpad (pause menu),
  *   IJKL d-pad (I up, K down, J left, L right).
  * Mouse (while the window has it, see tlggpu_mouse_take; Esc releases it, a click takes it back):
- *   motion turns the camera (right stick, src/mouse_stick.h), left button R2 (use the power),
+ *   motion turns the camera through the direct native aim hook, left button R2 (use the power),
  *   right button L2 (aim), middle button R3. X1/X2 and the wheel are free for TLG_KEY_MAP
  *   ("Mouse X1", "Wheel Up", ...). */
 #define _GNU_SOURCE
@@ -20,8 +20,9 @@
 #include <pthread.h>
 #include <time.h>
 #include <SDL3/SDL.h>
-#include "mouse_stick.h"
 #include "iss_mouse_aim.h"
+#include "iss_power_wheel.h"
+#include "power_wheel_input.h"
 #include "mouse_touch.h"
 #include "rumble_gate.h"
 #include "mouse_shake.h"
@@ -557,12 +558,14 @@ static void load_pad_mode(void) {
 /* What sample_mouse decided for this sample; sample_host turns it into touches and buttons. */
 static struct { bool active, two_fingers; MouseTouch finger; MouseTouchOut out; } mouse_pad;
 
-/* The mouse: motion on the right stick, buttons and wheel pulses as source bits (1 << (source -
+/* The mouse: native camera motion, buttons and wheel pulses as source bits (1 << (source -
  * MOUSE_SOURCE)). A wheel notch holds its button WHEEL_PULSE_US, then WHEEL_GAP_US up, so each
  * notch is one press (menus scroll one item per notch). TLG_MOUSE_LOG=1 (or TLG_MOUSE_TEST)
  * logs what the game gets. Called under lock. */
 enum { WHEEL_PULSE_US=80000, WHEEL_GAP_US=40000 };
-static MouseStick mouse_stick;
+static PwHold power_hold;
+static float power_mouse_dx,power_mouse_dy,power_cursor_x,power_cursor_y;
+static int power_cursor_source;
 static MouseShake mouse_shake;
 /* TLG_MOUSE_SHAKE=0 turns the wiggle shake off; TLG_MOUSE_SHAKE_COUNTS (default 40) is how far
  * one swing must travel, in mouse counts (raise it if aiming shakes the can by itself). */
@@ -583,21 +586,22 @@ static bool wheel_bound(void) {
         if (key_map.entries[i].source>=WHEEL_UP && key_map.entries[i].source<=WHEEL_RIGHT) return true;
     return false;
 }
-static uint64_t mouse_last_us;
 static struct { int pending; uint64_t until, next; } wheel[4];
 static size_t mouse_samples;
 static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
     TlgGpuMouse m;
     tlggpu_mouse_take(&m);
+    power_mouse_dx=m.dx;power_mouse_dy=m.dy;
     TlgGpuInputSettings in;
     tlggpu_input_settings(&in);
+    if(power_hold.open){
+        runtime_mouse_aim_motion(0,0,in.sensitivity,in.invert_y,0);
+        return 0; /* mouse motion selects a wheel sector; clicks do not attack */
+    }
     const uint64_t now=d->timestamp;
-    const float dt=mouse_last_us ? (float)(now-mouse_last_us)/1e6f : MOUSE_STICK_WINDOW_S;
-    mouse_last_us=now;
     static bool was_captured;
     if (!in.mouse_enabled || !m.captured) {
         runtime_mouse_aim_motion(0,0,in.sensitivity,in.invert_y,0);
-        memset(&mouse_stick,0,sizeof(mouse_stick));
         memset(wheel,0,sizeof(wheel));
         mouse_shake_reset(&mouse_shake);
         mouse_shaking=0;
@@ -610,7 +614,6 @@ static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
     load_pad_mode();
     if (!was_captured) { m.dx=m.dy=0; was_captured=true; } /* motion from before the game read the pad */
     ++mouse_samples;
-    const MouseStickParams p={in.sensitivity,in.smoothing,in.accel,in.deadzone,in.invert_y};
     const uint32_t raw=m.held|m.pressed;
     /* Touchpad mode: the mode key (a keyboard key or a mouse button). */
     bool key_down=false;
@@ -643,7 +646,6 @@ static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
     }
     mouse_pad.active=pad_mode;
     if (pad_mode) {
-        memset(&mouse_stick,0,sizeof(mouse_stick));
         const int left=(raw>>(MOUSE_LEFT-MOUSE_SOURCE)) & 1, middle=(raw>>(MOUSE_MIDDLE-MOUSE_SOURCE)) & 1;
         const int right=(raw>>(MOUSE_RIGHT-MOUSE_SOURCE)) & 1;
         mouse_pad.two_fingers=right;
@@ -672,15 +674,15 @@ static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
         motion.aim_pitch+=(in.invert_y ? m.dy : -m.dy)*k;
         motion.yaw=fminf(fmaxf(motion.yaw,-1.4f),1.4f);
         motion.aim_pitch=fminf(fmaxf(motion.aim_pitch,-1.2f),1.2f);
-        memset(&mouse_stick,0,sizeof(mouse_stick));
-    } else if(runtime_mouse_aim_motion(m.dx,m.dy,in.sensitivity,in.invert_y,1)){
-        memset(&mouse_stick,0,sizeof(mouse_stick));
-    } else mouse_stick_update(&mouse_stick,&p,m.dx,m.dy,dt);
+    } else {
+        /* Mouse camera input never enters the legacy right-stick emulator.
+         * If the guarded direct hook is unavailable, leave controller axes
+         * untouched and do not silently revive old mouse settings. */
+        runtime_mouse_aim_motion(m.dx,m.dy,in.sensitivity,in.invert_y,1);
+    }
     if(aiming_can || pad_mode)runtime_mouse_aim_motion(0,0,in.sensitivity,in.invert_y,0);
     if (!aiming_can || pad_mode) { mouse_shake_reset(&mouse_shake); mouse_shaking=0; }
     const uint8_t base_x=d->right_x, base_y=d->right_y;
-    d->right_x=mouse_stick_add(d->right_x,mouse_stick_axis(&mouse_stick,&p,0));
-    d->right_y=mouse_stick_add(d->right_y,mouse_stick_axis(&mouse_stick,&p,1));
     uint32_t bits=raw;
     if (pad_mode) bits&=~(uint32_t)MOUSE_BUTTONS_MASK; /* the buttons are fingers now */
     const int32_t notches[4]={m.wheel_up,m.wheel_down,m.wheel_left,m.wheel_right};
@@ -726,6 +728,7 @@ static void key_axis(uint8_t *axis, bool negative, bool positive) {
     if (negative || positive) *axis=(uint8_t)(128-(negative ? 128 : 0)+(positive ? 127 : 0));
 }
 static void sample_host(PadData *d) {
+    power_mouse_dx=power_mouse_dy=0;
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
     d->orientation[3]=1.0f;
@@ -952,8 +955,56 @@ static void replay_sample(PadData *d) {
 /* After the menu or the text dialog closes, buttons still held (the Cross that accepted a
  * name) stay hidden until released: the game would take them as a new press. */
 static int hold_after_capture;
+static unsigned power_previous_keys;
+static void power_switch_input(PadData *d){
+    IssPowerWheelStatus status;runtime_power_wheel_status(&status);
+    int enabled,keys[4],instant;tlggpu_power_wheel_settings(&enabled,keys,&instant);
+    const int capture=tlggpu_overlay_captures_input();
+    const int gameplay=runtime_power_wheel_gameplay();
+    const bool *keyboard=SDL_WasInit(SDL_INIT_VIDEO)?SDL_GetKeyboardState(NULL):NULL;
+    const int focus=SDL_WasInit(SDL_INIT_VIDEO)&&SDL_GetKeyboardFocus()!=NULL;
+    int allowed=enabled&&status.supported&&status.ready&&!status.error&&!capture&&focus&&gameplay;
+    if(d->buttons&(BTN_OPTIONS|BTN_TOUCHPAD))allowed=0;
+    unsigned held=0;
+    for(int i=0;i<4;i++)if(keyboard&&keys[i]>0&&keys[i]<SDL_SCANCODE_COUNT&&keyboard[keys[i]])held|=1u<<i;
+    int keyboard_choice=-1;
+    if(allowed)for(int i=0;i<4;i++)if((held&~power_previous_keys)&(1u<<i)){
+        if(status.unlocked_mask&(1<<i))runtime_power_wheel_request(i);
+        keyboard_choice=i;
+        break;
+    }
+    power_previous_keys=held;
+    const int down=!!(d->buttons&BTN_DOWN);
+    float x=((float)d->right_x-128.0f)/127.0f,y=((float)d->right_y-128.0f)/127.0f;
+    if(!allowed||!down||!power_hold.held){power_cursor_source=0;power_cursor_x=power_cursor_y=0;}
+    if(power_hold.open&&allowed&&down){
+        if(pw_direction(x,y)>=0)power_cursor_source=0;
+        else if(power_mouse_dx!=0||power_mouse_dy!=0){
+            power_cursor_source=1;
+            power_cursor_x=fminf(1,fmaxf(-1,power_cursor_x+power_mouse_dx/240.0f));
+            power_cursor_y=fminf(1,fmaxf(-1,power_cursor_y+power_mouse_dy/240.0f));
+        }
+        if(keyboard_choice>=0){
+            static const float dx[4]={-0.8f,0,0.8f,0},dy[4]={0,-0.8f,0,0.8f};
+            power_cursor_source=2;power_cursor_x=dx[keyboard_choice];power_cursor_y=dy[keyboard_choice];
+            if(instant){power_hold.choice=keyboard_choice;power_hold.fired=1;}
+        }
+        if(power_cursor_source){x=power_cursor_x;y=power_cursor_y;}
+    }
+    PwHoldResult wheel=pw_hold_mode(&power_hold,now_us(),allowed,down,x,y,
+                              instant,(unsigned)status.unlocked_mask);
+    runtime_power_wheel_visual(wheel.open,wheel.choice);
+    if(wheel.consume_down)d->buttons&=~BTN_DOWN;
+    if(wheel.tap)d->buttons|=BTN_DOWN;
+    if(wheel.consume_stick){
+        d->right_x=d->right_y=128;
+        runtime_mouse_aim_motion(0,0,1,0,0);
+    }
+    if(wheel.request>=0&&(status.unlocked_mask&(1<<wheel.request)))runtime_power_wheel_request(wheel.request);
+}
 static void sample(PadData *d) {
     sample_host(d);
+    power_switch_input(d);
     if (tlggpu_overlay_captures_input()) { hold_after_capture=1; click.side=-1; return; }
     record_sample(d); /* the click sources as they are: a replay plays them again */
     read_inject();

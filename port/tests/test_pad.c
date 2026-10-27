@@ -4,16 +4,25 @@
 #include "../src/runtime_pad.c"
 // runtime_mouse_aim.c (the native aim hook) needs the guest; pad tests run without it.
 int runtime_mouse_aim_installed(void) { return 0; }
-int runtime_mouse_aim_motion(float dx, float dy, float sensitivity, int invert_y, int active) { (void)dx; (void)dy; (void)sensitivity; (void)invert_y; (void)active; return 0; }
+int runtime_power_wheel_gameplay(void) { return 1; }
+void runtime_power_wheel_status(IssPowerWheelStatus *out){memset(out,0,sizeof(*out));}
+void runtime_power_wheel_request(int index){(void)index;}
+void runtime_power_wheel_visual(int open,int choice){(void)open;(void)choice;}
+void tlggpu_power_wheel_settings(int *enabled,int keys[4],int *instant){*enabled=0;*instant=0;memset(keys,0,4*sizeof(*keys));}
+static int direct_available,motion_calls;
+static float observed_dx,observed_dy;
+int runtime_mouse_aim_motion(float dx, float dy, float sensitivity, int invert_y, int active) { (void)sensitivity; (void)invert_y; if(active){motion_calls++;observed_dx=dx;observed_dy=dy;} return direct_available; }
 #ifdef _WIN32
 #define setenv(name, value, overwrite) _putenv_s(name, value)
 #endif
 
 static int capture;
 /* The GPU library (not linked here): the mouse and the input settings. */
-void tlggpu_mouse_take(TlgGpuMouse *mouse) { memset(mouse,0,sizeof(*mouse)); }
+static TlgGpuMouse supplied_mouse;
+static TlgGpuInputSettings supplied_settings;
+void tlggpu_mouse_take(TlgGpuMouse *mouse) { *mouse=supplied_mouse; }
 void tlggpu_mouse_pad_hud(int a, float x, float y, int t, int c) { (void)a; (void)x; (void)y; (void)t; (void)c; }
-void tlggpu_input_settings(TlgGpuInputSettings *settings) { memset(settings,0,sizeof(*settings)); }
+void tlggpu_input_settings(TlgGpuInputSettings *settings) { *settings=supplied_settings; }
 uint64_t tlggpu_total_draws(void) { return 0; }
 void tlggpu_frame_counters(TlgGpuFrameCounters *out) { memset(out,0,sizeof(*out)); }
 int tlggpu_overlay_captures_input(void) { return capture; }
@@ -61,6 +70,17 @@ int main(void) {
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189");
     assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD));
     assert(pad_init()==0 && pad_open(1,0,0,NULL)==1);
+    /* Direct mouse motion cannot alter physical controller axes, including
+     * when the direct hook is unavailable. Motion is sent only to direct aim. */
+    supplied_settings.mouse_enabled=1;supplied_settings.sensitivity=1;
+    supplied_mouse.captured=1;supplied_mouse.dx=120;supplied_mouse.dy=-80;
+    for(int available=0;available<2;available++){
+        direct_available=available;
+        PadData d={0};d.right_x=76;d.right_y=201;d.timestamp=1000000;
+        sample_mouse(&d,false,NULL);d.timestamp+=16000;sample_mouse(&d,false,NULL);
+        assert(d.right_x==76&&d.right_y==201&&observed_dx==120&&observed_dy==-80);
+    }
+    assert(motion_calls==4);memset(&supplied_mouse,0,sizeof(supplied_mouse));memset(&supplied_settings,0,sizeof(supplied_settings));
 
     /* A click without a touch surface (Back, Tab, Backspace, the pad file) plays like a finger:
      * the touch comes first, the button CLICK_LEAD_US later, and the touch stays CLICK_TAIL_US

@@ -41,6 +41,10 @@ extern "C" void runtime_restart(void); // src/probe.c: starts run.py again, ends
 #include "tlg_overlay_scale.h"
 #ifdef TLG_RENDERER_V2
 #include "../../src/iss_native_resolution.h"
+#include "../../src/iss_native_live.h"
+#include "../../src/iss_power_wheel.h"
+#include "tlg_power_art.h"
+#include "tlg_trophies.h"
 extern void TlgKarmaMenu();
 #endif
 #include "imgui_internal.h" // RegisterUserTexture (save pictures)
@@ -384,6 +388,14 @@ std::string OverlayText() {
     sample.fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
     sample.frame_ms = frame_ms_avg;
     sample.upscaler = UpscalerLabel(s.upscaler);
+#ifdef TLG_RENDERER_V2
+    // inFAMOUS: the upscaler is one of its own settings (the legacy field above is the other port's).
+    if (s.iss_temporal) {
+        sample.upscaler = s.iss_temporal_backend == 1 ? "DLSS" : "FSR 3.1";
+    } else if (s.fsr1) {
+        sample.upscaler = "FSR 1";
+    }
+#endif
     return P::Format(sample, items, s.overlay_layout == 0);
 }
 
@@ -422,8 +434,31 @@ void ImageTab() {
     // built for GoW3's pipeline and make TLG's image shake, so they are not offered here.
     ImGui::SeparatorText(TL("Scaling and sharpening", "Escala e nitidez"));
     if (BeginRows("##scaling")) {
+#ifdef TLG_RENDERER_V2
+        // One selector for every upscaler: the spatial FSR 1 on the final image, or one temporal upscaler
+        // (FSR 3.1 / DLSS) that replaces the game's anti-aliasing. Off keeps the game as it is.
+        static const char* const upscaler_names[] = {TL("Off", "Desligado"), TL("FSR 1 (spatial)", "FSR 1 (espacial)"),
+                                                     "FSR 3.1 (temporal)", "NVIDIA DLSS (temporal)"};
+        static std::atomic<int> upscaler_choice{0};
+        const int current = s.iss_temporal ? (s.iss_temporal_backend == 1 ? 3 : 2) : (s.fsr1 ? 1 : 0);
+        upscaler_choice = current;
+        ChoiceRow(TL("Upscaler (temporal ones: next start)", "Upscaler (os temporais: próxima partida)"), upscaler_choice, upscaler_names, nullptr, 4,
+                  TL("FSR 1 enlarges the image on the final frame (no shimmer). FSR 3.1 and DLSS replace the game's anti-aliasing and rebuild the image from several frames; "
+                     "DLSS needs a GeForce RTX card, nvngx_dlss.dll and the tlg_dlss.dll bridge (the launcher's Graphics screen shows what is missing), without them FSR 3.1 is used.",
+                     "O FSR 1 amplia a imagem do quadro final (sem tremor). FSR 3.1 e DLSS trocam o anti-aliasing do jogo e reconstroem a imagem a partir de vários quadros; "
+                     "o DLSS precisa de uma GeForce RTX, do nvngx_dlss.dll e da ponte tlg_dlss.dll (a tela Gráficos do launcher mostra o que falta), sem eles usa-se o FSR 3.1."));
+        if (upscaler_choice != current) {
+            const int pick = upscaler_choice;
+            s.fsr1 = pick == 1;
+            s.iss_temporal = pick >= 2;
+            if (pick >= 2) s.iss_temporal_backend = pick == 3 ? 1 : 0;
+            if (pick >= 2 && s.iss_native_output == 0) s.iss_native_output = 1; // the mode row needs an output resolution
+            dirty = true;
+        }
+#else
         CheckRow(TL("Upscale with FSR 1", "Ampliar com FSR 1"), s.fsr1,
                  TL("Enlarges the game image when it is smaller than the window (spatial filter, no shimmer).", "Amplia a imagem do jogo quando ela é menor que a janela (filtro espacial, sem tremor)."));
+#endif
         ImGui::BeginDisabled(rcas_blocked);
         CheckRow(TL("Sharpening (RCAS)", "Nitidez (RCAS)"), s.rcas,
                  rcas_blocked && downscaling ? TL("No effect: the game's image is larger than the window.", "Sem efeito: a imagem do jogo é maior que a janela.")
@@ -433,6 +468,17 @@ void ImageTab() {
         ImGui::BeginDisabled(!s.rcas || rcas_blocked);
         SliderRow(TL("Sharpening strength", "Intensidade da nitidez"), s.rcas_strength, 0, 100, "%d%%", TL("How strong the sharpening is.", "Quão forte é a nitidez."));
         ImGui::EndDisabled();
+#ifdef TLG_RENDERER_V2
+        static const char* const temporal_labels[] = {TL("Native (anti-aliasing, resolution below)", "Nativo (anti-aliasing, resolução abaixo)"),
+                                                      TL("Quality (1.5x)", "Qualidade (1,5x)"), TL("Balanced (1.7x)", "Equilibrado (1,7x)"),
+                                                      TL("Performance (2x)", "Desempenho (2x)"), TL("Ultra performance (3x)", "Desempenho máximo (3x)")};
+        ImGui::BeginDisabled(!s.iss_temporal || s.iss_native_output == 0);
+        ChoiceRow(TL("Temporal upscaler: mode (next start)", "Upscaler temporal: modo (próxima partida)"), s.iss_temporal_mode, temporal_labels, nullptr, 5,
+                  s.iss_native_output == 0 ? TL("Needs an output resolution in the Native rendering tab.", "Precisa de uma resolução de saída na aba Renderização nativa.")
+                                           : TL("The game draws at the output size divided by this ratio and FSR 3.1 rebuilds the output image. Native keeps the internal resolution chosen in the Native rendering tab.",
+                                                "O jogo desenha no tamanho da saída dividido por essa razão e o FSR 3.1 reconstrói a imagem de saída. Nativo mantém a resolução interna escolhida na aba Renderização nativa."));
+        ImGui::EndDisabled();
+#endif
         ImGui::EndTable();
     }
     ImGui::SeparatorText(TL("Draw distance and detail", "Distância de visão e detalhe"));
@@ -461,6 +507,36 @@ void ImageTab() {
                     "Plano distante padrão das câmeras (o jogo usa 10000000, sem limite). Menor corta a visão; "
                     "vale na próxima câmera."),
                  ImGuiSliderFlags_Logarithmic);
+        static const char* const cull_labels[] = {TL("The game's own", "Do jogo"), TL("Never drop objects", "Nunca descartar objetos"),
+                                                  TL("Performance (drop from level 11)", "Desempenho (descarta a partir do nível 11)")};
+        ChoiceRow(TL("Dynamic quality: dropped objects", "Qualidade dinâmica: objetos descartados"), s.dyn_cull, cull_labels, nullptr, 3,
+                  s.view_supported ? TL("In heavy scenes the game raises a quality level on its own and, at levels 15 to 20, skips a share of "
+                                        "objects and particles at random. Performance starts skipping earlier: smoother, less detail.",
+                                        "Em cenas pesadas o jogo sobe um nível de qualidade sozinho e, nos níveis 15 a 20, pula uma parte dos "
+                                        "objetos e partículas ao acaso. Desempenho começa a pular antes: mais fluido, menos detalhe.")
+                                   : TL(Unsupported, "Indisponível: versão do jogo ou assinatura do código diferente."));
+        static const char* const target_labels[] = {TL("Off", "Desligado"), "30 FPS", "45 FPS", "60 FPS"};
+        static const int target_values[] = {0, 30, 45, 60};
+        ChoiceRow(TL("Automatic quality: target frame rate", "Qualidade automática: taxa de quadros alvo"), s.quality_target_fps,
+                  target_labels, target_values, 4,
+                  s.view_supported ? TL("Raises the minimum quality level while the frame rate stays under the target and gives it back when "
+                                        "there is room to spare (menus and loading are ignored). The minimum below still applies.",
+                                        "Sobe o nível mínimo de qualidade enquanto a taxa de quadros fica abaixo do alvo e devolve quando "
+                                        "há folga (menus e carregamentos são ignorados). O mínimo abaixo continua valendo.")
+                                   : TL(Unsupported, "Indisponível: versão do jogo ou assinatura do código diferente."));
+        SliderRow(TL("Minimum dynamic quality level", "Nível mínimo da qualidade dinâmica"), s.quality_floor, 0, 14, "%d",
+                  s.view_supported ? TL("The game steps its quality level (0 best, 14 lowest: shorter LOD, fewer shadow cascades, fewer "
+                                        "objects) up in heavy scenes and back down in light ones. Raising the minimum keeps the "
+                                        "lighter levels: more FPS on weak hardware, less detail.",
+                                        "O jogo sobe o nível de qualidade (0 melhor, 14 mais baixo: LOD mais curto, menos cascatas de sombra, "
+                                        "menos objetos) em cenas pesadas e desce nas leves. Subir o mínimo mantém os níveis mais leves: "
+                                        "mais FPS em máquina fraca, menos detalhe.")
+                                   : TL(Unsupported, "Indisponível: versão do jogo ou assinatura do código diferente."));
+        SliderRow(TL("Draw list budget (next start)", "Orçamento das listas de draw (próximo início)"), s.draw_budget, 10, 100, "%d%%",
+                  TL("Share of the game's 24 MB / 10 MB frame command lists. Lower makes the game cut LOD, shadows and detail sooner "
+                     "in heavy scenes. Read at start: set it in the launcher or in tlg.ini and restart.",
+                     "Parte das listas de comandos de 24 MB / 10 MB do quadro. Menor faz o jogo reduzir LOD, sombras e detalhe mais cedo "
+                     "em cenas pesadas. Lido na partida: ajuste no launcher ou no tlg.ini e reinicie."));
         ImGui::EndDisabled();
         FloatRow(TL("Texture LOD bias (MipLodBias)", "Bias de LOD das texturas (MipLodBias)"), s.mip_lod_bias, -3.0f, 3.0f,
                  "%+.2f",
@@ -474,6 +550,10 @@ void ImageTab() {
             s.near_clip = 10.0f;
             s.far_clip = 1.0e7f;
             s.mip_lod_bias = 0.0f;
+            s.dyn_cull = 0;
+            s.draw_budget = 100;
+            s.quality_floor = 1;
+            s.quality_target_fps = 0;
             const float bands[6] = {400.0f, 750.0f, 1500.0f, 3500.0f, 6000.0f, 15000.0f};
             for (int b = 0; b < 6; ++b) s.lod_bands[b] = bands[b];
             dirty = true;
@@ -633,6 +713,65 @@ void OpenGuide(); // the graffiti guide (below, with the save dialogs)
 extern "C" int runtime_mouse_aim_installed(void);
 void ControlsTab() {
     auto& s = TlgSettings::Get();
+#ifdef TLG_RENDERER_V2
+    IssPowerWheelStatus power_status{};runtime_power_wheel_status(&power_status);
+    if(power_status.supported){
+        ImGui::SeparatorText("Power switching test");
+        ImGui::TextWrapped("Switches apply after closing Insert. Every switch carries the current energy percentage and missile count, capped to the new power's capacity. Switching never refills resources.");
+        static const char *names[]={"Smoke","Neon","Video","Concrete"};
+        bool power_enabled=s.iss_power_switch_enabled;
+        if(ImGui::Checkbox("Enable quick power switching",&power_enabled)){
+            s.iss_power_switch_enabled=power_enabled;TlgSettings::Save();
+            if(!power_enabled)runtime_power_wheel_request(-1);
+        }
+        bool instant=s.iss_power_instant;
+        if(ImGui::Checkbox("Switch immediately on stick direction",&instant)){
+            s.iss_power_instant=instant;runtime_power_wheel_request(-1);TlgSettings::Save();
+        }
+        ImGui::TextWrapped(instant?"D-pad Down + a quick stick flick switches immediately. Keep holding to open the wheel; release D-pad Down to confirm its final highlight. Left Smoke, up Neon, right Video, down Concrete.":
+            "Hold D-pad Down for the wheel, choose with the right stick, then release. Hold the stick centered briefly to cancel. A quick tap keeps the normal D-pad action.");
+        ImGui::TextUnformatted("Keyboard defaults: F5 / F6 / F7 / F8.");
+        float wheel_glow=s.iss_power_glow;
+        if(ImGui::SliderFloat("Wheel glow",&wheel_glow,0.5f,3.0f,"%.2fx")){
+            s.iss_power_glow=wheel_glow;
+        }
+        if(ImGui::IsItemDeactivatedAfterEdit())TlgSettings::Save();
+        ImGui::TextWrapped("With the wheel open, use the right stick, arrow keys or mouse to highlight a power. Keyboard/mouse: hold K (the default D-pad Down binding) to open it.");
+        for(int i=0;i<4;i++){
+            if(i)ImGui::SameLine();
+            ImGui::BeginDisabled(!power_enabled||!power_status.ready||!(power_status.unlocked_mask&(1<<i)));
+            if(ImGui::Button(names[i]))runtime_power_wheel_request(i);
+            ImGui::EndDisabled();
+        }
+        static char key_names[4][40]{};
+        static bool key_names_ready=false;
+        static const char *key_problem="";
+        if(!key_names_ready){
+            for(int i=0;i<4;i++)std::snprintf(key_names[i],sizeof(key_names[i]),"%s",SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[i].load())));
+            key_names_ready=true;
+        }
+        ImGui::TextUnformatted("Shortcut keys: edit a key name, then click Apply or leave the field. Use an unused key.");
+        for(int i=0;i<4;i++){
+            ImGui::PushID(i);ImGui::SetNextItemWidth(100.0f*base_scale);
+            bool apply=ImGui::InputText(names[i],key_names[i],sizeof(key_names[i]),ImGuiInputTextFlags_EnterReturnsTrue);
+            apply=ImGui::IsItemDeactivatedAfterEdit()||apply;
+            ImGui::SameLine();apply=ImGui::Button("Apply")||apply;
+            if(apply){
+                SDL_Scancode code=SDL_GetScancodeFromName(key_names[i]);
+                bool valid=code!=SDL_SCANCODE_UNKNOWN&&code!=SDL_SCANCODE_INSERT&&code!=SDL_SCANCODE_ESCAPE&&
+                    code!=SDL_SCANCODE_F9&&code!=SDL_SCANCODE_F10&&code!=SDL_SCANCODE_F11;
+                for(int j=0;j<4;j++)if(j!=i&&s.iss_power_keys[j]==int(code))valid=false;
+                if(valid){s.iss_power_keys[i]=int(code);TlgSettings::Save();key_problem="";}
+                else key_problem="Key not applied: use a valid, distinct key. Insert, Escape and F9-F11 are reserved.";
+            }
+            ImGui::SameLine();ImGui::Text("Active: %s",SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[i].load())));
+            ImGui::PopID();
+        }
+        if(*key_problem)ImGui::TextWrapped("%s",key_problem);
+        if(power_status.error)ImGui::Text("Switching stopped after verification error %d. Reload the copied save.",power_status.error);
+        else if(power_status.pending)ImGui::TextUnformatted("Switch queued for gameplay.");
+    }
+#endif
     // Mouse (src/runtime_pad.c): the camera settings apply at once. The buttons and the touchpad
     // mode are fixed unless TLG_KEY_MAP / TLG_MOUSE_PAD_* (or tlg.ini key_map) change them.
     ImGui::SeparatorText(TL("Mouse", "Mouse"));
@@ -646,17 +785,7 @@ void ControlsTab() {
         CheckRow(TL("Invert Y axis", "Inverter eixo Y"), s.mouse_invert_y,
                  TL("Moving the mouse forward looks down.", "Empurrar o mouse para frente olha para baixo."));
         const bool direct_mouse=runtime_mouse_aim_installed()!=0;
-        if(direct_mouse)InfoRow(TL("Camera input", "Entrada da câmera"),TL("Direct mouse (experimental)","Mouse direto (experimental)"));
-        ImGui::BeginDisabled(direct_mouse);
-        FloatRow(TL("Smoothing", "Suavização"), s.mouse_smoothing, 0.0f, 0.9f, "%.2f",
-                 TL("Evens out the camera motion; higher values feel softer and a little slower.",
-                    "Deixa o movimento da câmera mais uniforme; valores altos ficam mais suaves e um pouco mais lentos."));
-        FloatRow(TL("Acceleration", "Aceleração"), s.mouse_accel, 0.0f, 2.0f, "%.2f",
-                 TL("Fast movements turn more than slow ones. 0 is linear.", "Movimentos rápidos giram mais que os lentos. 0 é linear."));
-        FloatRow(TL("Anti-dead zone", "Anti-zona morta"), s.mouse_deadzone, 0.0f, 0.5f, "%.2f",
-                 TL("Small mouse movements skip the game's stick dead zone. Raise it if slow movements do nothing.",
-                    "Movimentos pequenos do mouse pulam a zona morta do analógico do jogo. Aumente se movimentos lentos não fizerem nada."));
-        ImGui::EndDisabled();
+        InfoRow(TL("Camera input", "Entrada da câmera"),direct_mouse?"Direct mouse":"Direct mouse unavailable - see run log");
         ImGui::EndDisabled();
         InfoRow(TL("Left / right / middle", "Esquerdo / direito / do meio"), "R2 / L2 / R3");
         InfoRow(TL("Touchpad mode", "Modo touchpad"), TL("hold Left Ctrl or Mouse X1", "segure Ctrl esquerdo ou botão X1 do mouse"));
@@ -762,18 +891,80 @@ int RestartChanges() {
 #ifdef TLG_RENDERER_V2
 void NativeRenderingTab() {
     auto& s=TlgSettings::Get();
-    ImGui::TextWrapped("Experimental native 3D rendering for CUSA00223 update 1.07. Changes apply after closing and relaunching the game.");
-    const char* outputs[]={"Off (original game)","1920 x 1080","2560 x 1440","3440 x 1440 (ultrawide)","3840 x 2160 (4K)","5120 x 1440 (super ultrawide)"};
+    if(const char* test=std::getenv("ISS_NATIVE_LIVE_REBUILD_TEST");test&&!std::strcmp(test,"1")){
+        ImGui::TextWrapped("Diagnostic: rebuild at the CURRENT resolution using the game's own path. This does not apply a new resolution.");
+        int state=runtime_native_live_rebuild_state();ImGui::BeginDisabled(state==1||state==2);
+        if(ImGui::Button("Test current-resolution rebuild"))runtime_native_live_rebuild_request();
+        ImGui::EndDisabled();ImGui::Text("Rebuild check: %s",state==3?"verified":state==2?"rebuilding":state==1?"queued":state<0?"not confirmed":"not run");
+    }
+    const bool live_native=runtime_native_live_enabled()!=0;
+    ImGui::TextWrapped("%s",live_native?"Experimental live native rendering. Select a resolution or release the internal resolution slider to queue a safe rebuild. Larger allocations still require restarting this candidate.":"Experimental native 3D rendering for CUSA00223 update 1.07. Changes apply after closing and relaunching the game.");
+    const char* outputs[]={TL("Off (original game)","Desligado (jogo original)"),"1080p  1920 x 1080","1440p  2560 x 1440",
+        "3440 x 1440 (21:9)","4K  3840 x 2160","5120 x 1440 (32:9)"};
     int output=s.iss_native_output, percent=s.iss_native_percent;
     bool edges=s.iss_native_hud_edges;
-    if(ImGui::Combo("Output resolution",&output,outputs,ISS_NATIVE_PRESETS)){s.iss_native_output=output;dirty=true;}
-    if(ImGui::SliderInt("Native render scale",&percent,25,200,"%d%%")){s.iss_native_percent=percent;dirty=true;}
-    if(ImGui::Checkbox("Place HUD at screen edges",&edges)){s.iss_native_hud_edges=edges;dirty=true;}
-    ImGui::TextWrapped("100%% renders the scene at the exact selected resolution. Lower scales reduce scene resolution. The vertical field of view stays the same; wider displays show more world horizontally. Uncheck edge HUD to keep it centered within 16:9.");
-    IssNativePlan requested;
-    if(output && iss_native_plan({output,percent,int(edges)},&requested))
-        ImGui::Text("Next launch: %u x %u scene, %u lighting entries",requested.width,requested.height,requested.light_entries);
-    else if(output)ImGui::TextWrapped("This scale exceeds the supported 4K pixel budget. Choose a smaller scale; this request will be refused at startup.");
+    // Output first; the internal resolution is a scene height (iss_native_pick in
+    // iss_native_resolution.h, the same arithmetic as the launchers), stored as the percent the game reads.
+    bool native_commit=false;
+    if(ImGui::Combo(TL("Output","Saída"),&output,outputs,ISS_NATIVE_PRESETS)){native_commit=true;
+        s.iss_native_percent=percent=iss_native_retarget(s.iss_native_output,percent,output);
+        s.iss_native_output=output;dirty=true;
+    }
+    const int step=output?iss_native_step_for_percent(output,percent):-1;
+    char preview[96];
+    if(!output)std::snprintf(preview,sizeof(preview),"-");
+    else if(step>=0)std::snprintf(preview,sizeof(preview),"%up",iss_native_step_heights[step]);
+    else std::snprintf(preview,sizeof(preview),TL("Custom (%d%%)","Personalizada (%d%%)"),percent);
+    ImGui::BeginDisabled(!output);
+    if(ImGui::BeginCombo(TL("Internal resolution","Resolução interna"),preview)){
+        for(int i=0;i<ISS_NATIVE_STEPS;i++){
+            IssNativePick pick;const int status=iss_native_pick(output,iss_native_step_heights[i],&pick);
+            char label[128];
+            if(status==ISS_NATIVE_PICK_OK)
+                std::snprintf(label,sizeof(label),pick.error?TL("%up  about %u x %u (%d%%)","%up  cerca de %u x %u (%d%%)"):"%up  %u x %u (%d%%)",
+                              iss_native_step_heights[i],pick.width,pick.height,pick.percent);
+            else if(status==ISS_NATIVE_PICK_BUDGET)
+                std::snprintf(label,sizeof(label),TL("%up  over the 4K limit","%up  acima do limite de 4K"),iss_native_step_heights[i]);
+            else std::snprintf(label,sizeof(label),TL("%up  out of range for this output","%up  fora do alcance desta saída"),iss_native_step_heights[i]);
+            ImGui::BeginDisabled(status!=ISS_NATIVE_PICK_OK);
+            if(ImGui::Selectable(label,i==step)){s.iss_native_percent=percent=pick.percent;dirty=true;native_commit=true;}
+            ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if(ImGui::SliderInt(TL("Custom scale (fine adjustment)","Escala personalizada (ajuste fino)"),&percent,25,200,"%d%%")){s.iss_native_percent=percent;dirty=true;}
+    if(ImGui::IsItemDeactivatedAfterEdit())native_commit=true;
+    if(ImGui::Checkbox("Place HUD at screen edges",&edges)){s.iss_native_hud_edges=edges;dirty=true;native_commit=true;}
+    // Native choices can apply while the overlay stays open. Persist committed edits now: closing the
+    // game directly need not pass through SetOpen(false). Slider drags still write only once, on release.
+    if(native_commit)TlgSettings::Save();
+    if(live_native&&native_commit)
+        runtime_native_live_request_config({output,percent,int(edges),s.iss_native_ui_16_9.load(),0});
+    if(live_native)ImGui::TextWrapped("%s",runtime_native_live_reason());
+    ImGui::TextWrapped("%s",TL("Pick the output (what is shown) and the internal resolution (what the 3D scene is drawn at): for example 720p inside a 1440p output renders less and shows more. The vertical field of view stays the same; wider displays show more world horizontally. Uncheck edge HUD to keep it centered within 16:9.",
+        "Escolha a saída (o que aparece) e a resolução interna (o tamanho em que a cena 3D é desenhada): por exemplo 720p dentro de uma saída 1440p desenha menos e mostra mais. O campo de visão vertical continua o mesmo; telas mais largas mostram mais mundo na horizontal. Desmarque o HUD nas bordas para manter o HUD centralizado em 16:9."));
+    IssNativePlan requested{};
+    const bool requested_valid=output && iss_native_plan({output,percent,int(edges),s.iss_native_ui_16_9.load(),0},&requested);
+    if(!output)ImGui::TextWrapped("%s",TL("Original game rendering. Pick an output to render natively.","Renderização do jogo original. Escolha uma saída para renderizar nativamente."));
+    else if(requested_valid){
+        ImGui::Text(TL("Next launch: scene %u x %u -> output %u x %u (%d%%), %u lighting entries","Próxima partida: cena %u x %u -> saída %u x %u (%d%%), %u entradas de iluminação"),
+                    requested.width,requested.height,requested.output_width,requested.output_height,percent,requested.light_entries);
+        if(step>=0){
+            IssNativePick pick;iss_native_pick(output,iss_native_step_heights[step],&pick);
+            if(pick.error){
+                ImGui::TextWrapped(TL("Not exact: %up is not a whole percent of this output (%+d px). It is exact on:","Não é exato: %up não é um percentual inteiro desta saída (%+d px). É exato em:"),
+                                   iss_native_step_heights[step],int(pick.error));
+                for(int other=1;other<ISS_NATIVE_PRESETS;other++){
+                    IssNativePick exact;
+                    if(other!=output&&iss_native_pick(other,iss_native_step_heights[step],&exact)==ISS_NATIVE_PICK_OK&&!exact.error)
+                        ImGui::BulletText("%s  %d%%",outputs[other],exact.percent);
+                }
+            }
+        }
+    }else ImGui::TextWrapped("%s",TL("This scale is over the 4K pixel limit: the game would refuse it at startup and run unchanged. Pick a lower internal resolution.",
+        "Esta escala passa do limite de pixels de 4K: o jogo a recusaria na partida e abriria sem mudança. Escolha uma resolução interna menor."));
+    ImGui::TextWrapped("%s",TL("Takes effect the next time the game starts.","Vale na próxima vez que o jogo iniciar."));
     ImGui::Separator();
     ImGui::TextWrapped("%s",runtime_native_reason());
     const int exclusive=s.exclusive_status;
@@ -782,10 +973,35 @@ void NativeRenderingTab() {
     if(runtime_native_status()==1){
         const auto* p=runtime_native_plan();
         ImGui::Text("Active scene: %u x %u (%d%%)",p->width,p->height,p->percent);
+        if(live_native && requested_valid && (p->width!=requested.width || p->height!=requested.height)){
+            const int phase=runtime_native_live_rebuild_state();
+            ImGui::TextColored(ImVec4(1.0f,0.75f,0.25f,1.0f),"%s",
+                phase==1||phase==2 ? "Selected size is waiting for its live rebuild." :
+                "Selected size is NOT active. Saved for next launch; restart required or choose a supported size.");
+        }
     }
+    uint32_t capacity_w{},capacity_h{},capacity_lights{};
+    if(live_native && runtime_native_live_capacity(&capacity_w,&capacity_h,&capacity_lights))
+        ImGui::TextWrapped("Startup allocation: %u x %u, %u lighting entries. Exceeding either dimension or the lighting budget requires restarting.",capacity_w,capacity_h,capacity_lights);
     ImGui::Text("Presented game image: %d x %d; window: %d x %d",s.image_width.load(),s.image_height.load(),s.window_width.load(),s.window_height.load());
     ImGui::TextWrapped("Use a matching display resolution and Borderless for native output. Disable external resolution patches. Startup movies and some post-processing still need visual validation.");
     if(ImGui::BeginTable("native_display",2)){DisplayModeRow();ImGui::EndTable();}
+}
+#endif
+#ifdef TLG_RENDERER_V2
+void PowerWheel(){
+    int open,choice;runtime_power_wheel_visual_status(&open,&choice);
+    IssPowerWheelStatus status{};runtime_power_wheel_status(&status);
+    if(!open||!status.ready||!TlgSettings::Get().iss_power_switch_enabled)return;
+    const auto *v=ImGui::GetMainViewport();
+    const ImVec2 center(v->Pos.x+v->Size.x*0.5f,v->Pos.y+v->Size.y*0.5f);
+    auto *draw=ImGui::GetForegroundDrawList();
+    const float side=std::min(450.0f*base_scale,std::min(v->Size.x,v->Size.y)*0.65f);
+    if(choice>=0&&!(status.unlocked_mask&(1<<choice)))choice=-1;
+    TlgPowerArt::Draw(draw,center,side,choice,ImGui::GetIO().DeltaTime,ImGui::GetTime(),TlgSettings::Get().iss_power_glow);
+    const char *hint=choice<0?"Center: cancel":(status.unlocked_mask&(1<<choice))?"Release to switch":"Locked";
+    ImVec2 text=ImGui::CalcTextSize(hint);
+    draw->AddText(ImVec2(center.x-text.x/2,center.y+side*0.51f),IM_COL32_WHITE,hint);
 }
 #endif
 void Menu() {
@@ -817,7 +1033,7 @@ void Menu() {
     }
     footer_help = nullptr;
 #ifdef TLG_RENDERER_V2
-    constexpr int TabCount = 6;
+    constexpr int TabCount = 7;
 #else
     constexpr int TabCount = 4;
 #endif
@@ -836,7 +1052,7 @@ void Menu() {
         static const char* const tabs[TabCount] = {"Overlay", TL("Image", "Imagem"), TL("Performance", "Desempenho"),
                                                    TL("Controls", "Controle")
 #ifdef TLG_RENDERER_V2
-                                                   ,"Karma", "Native rendering"
+                                                   ,"Karma", "Native rendering", "Trophies"
 #endif
                                                    };
         for (int tab = 0; tab < TabCount; ++tab) {
@@ -856,6 +1072,7 @@ void Menu() {
 #ifdef TLG_RENDERER_V2
                 case 4: TlgKarmaMenu(); break;
                 case 5: NativeRenderingTab(); break;
+                case 6: TlgTrophiesMenu(); break;
 #endif
                 default: OverlayTab(); break;
                 }
@@ -2105,7 +2322,13 @@ void SetMousePad(bool active, float x, float y, bool touching, bool clicking) {
 bool Visible() {
     const auto& s = TlgSettings::Get();
     const auto now = std::chrono::steady_clock::now();
-    return initialized && (loading || background_total || menu_open || text_entry_active || choice_active ||
+    bool power_wheel_visible=false;
+#ifdef TLG_RENDERER_V2
+    int wheel_open,wheel_choice;
+    runtime_power_wheel_visual_status(&wheel_open,&wheel_choice);
+    power_wheel_visible=wheel_open&&s.iss_power_switch_enabled;
+#endif
+    return initialized && (power_wheel_visible || loading || background_total || menu_open || text_entry_active || choice_active ||
                            message_active || guide_active || progress_on || now < progress_until || now < toast_until ||
                            NoticeActive() || mouse_pad_on ||
                            choice_retiring || s.show_fps ||
@@ -2256,6 +2479,11 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
 
     UpdateChoiceTextures();
+#ifdef TLG_RENDERER_V2
+    int power_open,power_choice;runtime_power_wheel_visual_status(&power_open,&power_choice);
+    if(power_open)TlgPowerArt::UpdateTexture();
+    if(menu_open && TlgSettings::Get().menu_tab==6)TlgTrophiesUpdateTextures();
+#endif
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
     if (loading) {
@@ -2269,6 +2497,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (!loading && !menu_open) {
         HealthDisplay();
+#ifdef TLG_RENDERER_V2
+        PowerWheel();
+#endif
     }
     if (background_total && !loading && !menu_open) {
         BackgroundLoading();

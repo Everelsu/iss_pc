@@ -1,0 +1,72 @@
+# Shared by tests/test_native_resolution.cpp and tests/test_native_resolution_launcher.py.
+# plan OUT PERCENT -> scene_w scene_h | refused
+# pick OUT TARGET_HEIGHT -> status(1 ok, 0 budget, -1 range, -2 output) percent width height error
+# step OUT PERCENT -> index into the step heights, -1 = none
+# retarget OLD_OUT PERCENT NEW_OUT -> percent to store
+plan 1 100 -> 1920 1080
+plan 2 50 -> 1280 720
+plan 2 100 -> 2560 1440
+plan 3 50 -> 1720 720
+plan 3 100 -> 3440 1440
+plan 4 100 -> 3840 2160
+plan 4 150 -> refused
+plan 5 100 -> 5120 1440
+plan 5 120 -> refused
+plan 1 200 -> 3840 2160
+plan 1 201 -> refused
+plan 1 24 -> refused
+plan 0 100 -> refused
+plan 6 100 -> refused
+plan 1 67 -> 1286 724
+plan 4 25 -> 960 540
+pick 1 540 -> 1 50 960 540 0
+pick 1 720 -> 1 67 1286 724 4
+pick 1 900 -> 1 83 1594 896 -4
+pick 1 1080 -> 1 100 1920 1080 0
+pick 1 1440 -> 1 133 2554 1436 -4
+pick 1 2160 -> 1 200 3840 2160 0
+pick 2 540 -> 1 37 948 532 -8
+pick 2 720 -> 1 50 1280 720 0
+pick 2 1080 -> 1 75 1920 1080 0
+pick 2 1440 -> 1 100 2560 1440 0
+pick 2 2160 -> 1 150 3840 2160 0
+pick 3 720 -> 1 50 1720 720 0
+pick 3 1440 -> 1 100 3440 1440 0
+pick 3 2160 -> 0 150 5160 2160 0
+pick 4 540 -> 1 25 960 540 0
+pick 4 720 -> 1 33 1268 712 -8
+pick 4 1080 -> 1 50 1920 1080 0
+pick 4 2160 -> 1 100 3840 2160 0
+pick 5 720 -> 1 50 2560 720 0
+pick 5 1440 -> 1 100 5120 1440 0
+pick 5 2160 -> 0 150 7680 2160 0
+pick 0 720 -> -2 0 0 0 0
+pick 6 720 -> -2 0 0 0 0
+pick 4 100 -> -1 0 0 0 0
+pick 4 4400 -> -1 0 0 0 0
+pick 1 270 -> 1 25 480 270 0
+pick 1 300 -> 1 28 538 302 2
+pick 1 2160 -> 1 200 3840 2160 0
+step 1 67 -> 1
+step 1 50 -> 0
+step 1 100 -> 3
+step 2 50 -> 1
+step 2 100 -> 4
+step 2 75 -> 3
+step 3 50 -> 1
+step 4 25 -> 0
+step 4 100 -> 5
+step 2 37 -> 0
+step 0 50 -> -1
+step 5 33 -> -1
+retarget 1 67 2 -> 50
+retarget 2 50 1 -> 67
+retarget 2 50 4 -> 33
+retarget 2 100 4 -> 67
+retarget 2 100 1 -> 133
+retarget 1 100 3 -> 75
+retarget 1 33 2 -> 33
+retarget 1 200 4 -> 100
+retarget 0 50 2 -> 50
+retarget 2 50 0 -> 50
+retarget 4 100 5 -> 100

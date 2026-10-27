@@ -1,0 +1,48 @@
+From: HayatoG <HayatoG@users.noreply.github.com>
+Subject: [PATCH] ffx_vk: uniform buffer memory falls back to host memory when the device-local host-visible heap is full
+
+Without resizable BAR the device-local host-visible heap is small (256 MB on some NVIDIA cards)
+and the application may hold all of it: vkAllocateMemory then fails with
+VK_ERROR_OUT_OF_DEVICE_MEMORY and the FSR 3 context could not be created (FFX_ERROR_OUT_OF_MEMORY).
+The uniform buffers now retry in plain host-visible memory.
+---
+--- a/upstream/ffx-1.1.4/sdk/src/backends/vk/ffx_vk.cpp
++++ b/upstream/ffx-1.1.4/sdk/src/backends/vk/ffx_vk.cpp
+@@ -1689,6 +1689,37 @@
+ 
+             VkResult result = backendContext->vkFunctionTable.vkAllocateMemory(backendContext->device, &allocInfo, nullptr, &backendContext->uniformBufferMemory);
+ 
++            // Without resizable BAR the device-local host-visible heap is small (256 MB on some NVIDIA cards) and the
++            // application may already hold all of it: the uniform buffers then go to plain host-visible memory.
++            if ((result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) &&
++                (requiredMemoryProperties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
++            {
++                VkPhysicalDeviceMemoryProperties memProperties;
++                vkGetPhysicalDeviceMemoryProperties(backendContext->physicalDevice, &memProperties);
++
++                uint32_t fallbackType = UINT32_MAX;
++                for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
++                {
++                    const VkMemoryPropertyFlags flags = memProperties.memoryTypes[i].propertyFlags;
++                    if (!(memRequirements.memoryTypeBits & (1u << i)) ||
++                        !(flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ||
++                        (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
++                        (!backendContext->deviceCoherentMemoryEnabled && (flags & VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD)))
++                        continue;
++
++                    fallbackType = i;
++                    backendContext->uniformBufferMemoryProperties = flags;
++                    if (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
++                        break;
++                }
++
++                if (fallbackType != UINT32_MAX)
++                {
++                    allocInfo.memoryTypeIndex = fallbackType;
++                    result = backendContext->vkFunctionTable.vkAllocateMemory(backendContext->device, &allocInfo, nullptr, &backendContext->uniformBufferMemory);
++                }
++            }
++
+             if (result != VK_SUCCESS)
+             {
+                 switch (result)
