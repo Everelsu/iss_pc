@@ -83,6 +83,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.key_map = value;
         return;
     }
+    if (key == "dlss_dll_dir") {
+        v.dlss_dll_dir = value;
+        return;
+    }
     if (key == "lod_bands") {
         // Six comma-separated distances; missing or bad entries keep the current value.
         const char* p = value.c_str();
@@ -165,6 +169,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.iss_native_hud_edges = i != 0;
     } else if (key == "iss_temporal") {
         v.iss_temporal = i != 0;
+    } else if (key == "iss_temporal_backend") {
+        v.iss_temporal_backend = std::clamp(i, 0, 1);
     } else if (key == "iss_native_ui_16_9") {
         v.iss_native_ui_16_9 = std::clamp(i,0,2);
     } else if (key == "render_resolution") {
@@ -271,6 +277,7 @@ void Load() {
         {"TLG_RUMBLE", "rumble"},
         {"TLG_DYN_CULL", "dyn_cull"},             {"TLG_DRAW_BUDGET", "draw_budget"},   {"TLG_QUALITY_FLOOR", "quality_floor"},
         {"TLG_QUALITY_TARGET_FPS", "quality_target_fps"}, {"TLG_ISS_TEMPORAL", "iss_temporal"},
+        {"TLG_ISS_TEMPORAL_BACKEND", "iss_temporal_backend"}, {"TLG_DLSS_DIR", "dlss_dll_dir"},
         {"TLG_LOD_SCALE", "lod_scale"},           {"TLG_LOD_BANDS", "lod_bands"},
         {"TLG_REGION_LOD", "region_lod"},         {"TLG_REGION_FADE", "region_fade"},
         {"TLG_NEAR_CLIP", "near_clip"},           {"TLG_FAR_CLIP", "far_clip"},
@@ -373,6 +380,7 @@ void Save() {
                  v.iss_native_output.load(),v.iss_native_percent.load(),int(v.iss_native_hud_edges.load()));
     std::fprintf(file, "iss_native_ui_16_9=%d\n",int(v.iss_native_ui_16_9.load()));
     std::fprintf(file, "iss_temporal=%d\n", int(v.iss_temporal.load()));
+    std::fprintf(file, "iss_temporal_backend=%d\ndlss_dll_dir=%s\n", v.iss_temporal_backend.load(), v.dlss_dll_dir.c_str());
     std::fprintf(file, "red_orb_multiplier=%.3f\n", v.red_orb_multiplier.load());
     std::fprintf(file, "damage_dealt=%.3f\n", v.damage_dealt.load());
     std::fprintf(file, "damage_taken=%.3f\n", v.damage_taken.load());

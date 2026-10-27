@@ -12,6 +12,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "iss_temporal_dlss.h"
 #include "iss_temporal_math.h"
 #include "tlg_settings.h"
 #include "video_core/host_shaders/iss_camera_motion_comp.h"
@@ -545,7 +546,7 @@ void Upscaler::Impl::Resolve(const Frame& frame, const DepthTargets& depth_targe
         return;
     }
     if (!backend) {
-        backend = CreateFsr3Backend(instance);
+        backend = CreateSelectedBackend(instance); // DLSS when chosen and usable, else FSR 3.1
     }
     float jitter[2] = {frame.jitter[0], frame.jitter[1]};
     ApplyJitterFlip(jitter);

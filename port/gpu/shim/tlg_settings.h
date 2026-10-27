@@ -173,6 +173,12 @@ struct Values {
     std::string key_map;
     // Append experimental settings so established renderer field offsets stay stable.
     std::atomic<int> iss_native_ui_16_9{0};
+    /// Upscaler behind iss_temporal (renderer v2): 0 FSR 3.1, 1 NVIDIA DLSS. DLSS needs a bridge DLL and the
+    /// player's own nvngx_dlss.dll (iss_temporal_dlss.h); without them the renderer uses FSR 3.1. Read at start.
+    std::atomic<int> iss_temporal_backend{0};
+    /// Folder with the player's nvngx_dlss.dll (and tlg_dlss.dll when it is not next to the executable). Empty:
+    /// <user data>/dlss, then the executable's folder. Written by Load only, read at start.
+    std::string dlss_dll_dir;
 };
 
 Values& Get();

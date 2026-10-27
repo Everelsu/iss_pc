@@ -281,6 +281,10 @@ bool Instance::CreateDevice() {
                VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     ASSERT_MSG(add_extension(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    // NVIDIA DLSS (iss_temporal_backend=1 with the player's DLLs): the extensions NGX needs. Empty otherwise.
+    for (const std::string& name : IssTemporal::Dlss::RequiredDeviceExtensions(*instance, physical_device)) {
+        add_extension(name);
+    }
 
     const auto robustness2_features = feature_chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
     ASSERT_MSG(robustness2_features.robustBufferAccess2,
@@ -716,6 +720,7 @@ bool Instance::CreateDevice() {
     device = std::move(dev);
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
+    IssTemporal::Dlss::Initialize(*instance, physical_device, *device);
     iss::native_geometry::RegisterIndirectFirstInstanceFeature(
         *this, request_indirect_first_instance && features.drawIndirectFirstInstance);
     if (request_indirect_first_instance && features.drawIndirectFirstInstance) {
