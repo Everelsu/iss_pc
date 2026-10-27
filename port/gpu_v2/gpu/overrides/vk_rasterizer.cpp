@@ -53,7 +53,7 @@ namespace iss::diagnostics {void RecordFeedbackBinding(u64 address,u64 size,u64 
 #include "common/perf_stats.h"
 #include "runtime_timeline.h"
 #include "compute_phase.h"
-#include "iss_temporal.h"
+#include "iss_temporal_upscaler.h"
 #include "tlg_settings.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -4909,6 +4909,10 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         }
 
         image.usage.depth_target = true;
+        if (TlgSettings::Get().iss_temporal.load(std::memory_order_relaxed) && regs.depth_buffer.DepthValid() &&
+            regs.depth_control.depth_write_enable) {
+            iss_depth_targets.Note(image.info.guest_address, image.info.size.width, image.info.size.height);
+        }
     } else {
         state.depth_stencil_attachment = {};
     }
@@ -6194,7 +6198,7 @@ void Rasterizer::IssTemporalMarker(const u32* payload, u32 dwords) {
     if (!iss_temporal) {
         iss_temporal = std::make_unique<IssTemporal::Upscaler>(instance, scheduler, runtime, texture_cache);
     }
-    iss_temporal->OnMarker(payload, dwords);
+    iss_temporal->OnMarker(payload, dwords, iss_depth_targets);
 }
 
 void Rasterizer::ScopeMarkerBegin(const std::string_view& str, bool from_guest) {

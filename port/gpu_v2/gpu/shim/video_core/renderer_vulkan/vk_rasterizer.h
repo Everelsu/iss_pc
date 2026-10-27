@@ -20,6 +20,7 @@
 #include "srt_walker_capture.h"
 #include "common/perf_stats.h"
 #include "common/recursive_lock.h"
+#include "iss_temporal_math.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
@@ -371,7 +372,7 @@ public:
                              const std::function<void()>& end_draw);
     void NativeGbufferInterpretedDraw(const iss::native_gbuffer::Batch& batch, bool last);
     void NativeGbufferRangeEnd(const iss::native_gbuffer::Batch* batch);
-    /// The game hook's temporal upscaler marker (gpu/iss_temporal.h): `payload` is the NOP body.
+    /// The game hook's temporal upscaler marker (gpu/iss_temporal_upscaler.h): `payload` is the NOP body.
     void IssTemporalMarker(const u32* payload, u32 dwords);
     void NativeGbufferVerifyFinish(bool complete);
     void NativeGbufferVerifyNative();
@@ -994,6 +995,7 @@ private:
     PipelineCache pipeline_cache;
     /// Made when the first marker arrives; declared after the caches it uses, so it goes first.
     std::unique_ptr<IssTemporal::Upscaler> iss_temporal;
+    IssTemporal::DepthTargets iss_depth_targets;
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 

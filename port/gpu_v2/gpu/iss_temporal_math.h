@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Pure parts of the temporal upscaler (iss_temporal.cpp): the marker the game hook puts into the command
+// Pure parts of the temporal upscaler (iss_temporal_upscaler.cpp): the marker the game hook puts into the command
 // buffer, and the matrix that takes this frame's clip space to the previous frame's. No Vulkan here, so
 // tests/test_iss_temporal.cpp can check them alone.
 #pragma once
@@ -174,5 +174,42 @@ inline bool MotionOfPixel(const Mat4& reproject, float x, float y, float depth, 
     motion[1] = (prev_v - scene_v) * size_y;
     return true;
 }
+
+/// The depth targets the game has drawn into with depth writes, by size, as guest addresses. The hook
+/// does not know where the scene depth is, so the renderer remembers the last depth target of each
+/// size and the marker's render size picks the scene's (shadow maps and the like have other sizes).
+/// Addresses, not image ids: the image may be replaced before the marker, and an address looked up in
+/// the texture cache is always safe.
+class DepthTargets {
+public:
+    void Note(std::uint64_t address, std::uint32_t width, std::uint32_t height) {
+        for (auto& entry : entries) {
+            if (entry.width == width && entry.height == height) {
+                entry.address = address;
+                return;
+            }
+        }
+        entries[next] = {address, width, height};
+        next = (next + 1) % entries.size();
+    }
+    /// 0 when no depth target of that size was drawn into.
+    [[nodiscard]] std::uint64_t Find(std::uint32_t width, std::uint32_t height) const {
+        for (const auto& entry : entries) {
+            if (entry.width == width && entry.height == height) {
+                return entry.address;
+            }
+        }
+        return 0;
+    }
+
+private:
+    struct Entry {
+        std::uint64_t address = 0;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+    };
+    std::array<Entry, 8> entries{};
+    std::uint32_t next = 0;
+};
 
 } // namespace Vulkan::IssTemporal

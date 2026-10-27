@@ -2,6 +2,7 @@
 // The pure parts of the temporal upscaler (gpu_v2/gpu/iss_temporal_math.h): the game's marker, the matrix
 // that reprojects this frame's clip space into the previous one, and the motion it gives a pixel.
 #include "../gpu_v2/gpu/iss_temporal_math.h"
+#include "../src/iss_temporal.h" // the game side: the marker both sides must agree on
 
 #include <cmath>
 #include <cstdio>
@@ -26,6 +27,13 @@ static int failures = 0;
             ++failures;                                                                        \
         }                                                                                      \
     } while (0)
+
+static_assert(kMarker == ISS_TEMPORAL_MARKER_MAGIC, "the marker magic");
+static_assert(kKindResolve == ISS_TEMPORAL_MARKER_KIND_RESOLVE, "the marker kind");
+static_assert(kVersion == ISS_TEMPORAL_MARKER_VERSION, "the marker version");
+static_assert(kPayloadDwords == ISS_TEMPORAL_MARKER_PAYLOAD_DWORDS, "the payload length");
+static_assert(kFlagCameraCut == ISS_TEMPORAL_FLAG_CAMERA_CUT, "the camera cut flag");
+static_assert(kFlagReversedDepth == ISS_TEMPORAL_FLAG_REVERSED_DEPTH, "the reversed depth flag");
 
 namespace {
 
@@ -169,6 +177,22 @@ void TestFarPlane() {
     CHECK(std::fabs(motion[0]) < 1.0f && std::fabs(motion[1]) < 1.0f);
 }
 
+void TestDepthTargets() {
+    DepthTargets targets;
+    CHECK(targets.Find(1920, 1080) == 0);
+    targets.Note(0x1000, 1920, 1080);
+    targets.Note(0x2000, 2048, 2048); // a shadow map
+    CHECK(targets.Find(1920, 1080) == 0x1000);
+    targets.Note(0x3000, 1920, 1080); // the same size replaces
+    CHECK(targets.Find(1920, 1080) == 0x3000);
+    CHECK(targets.Find(2048, 2048) == 0x2000);
+    for (std::uint32_t i = 0; i < 20; ++i) { // more sizes than entries: the oldest go
+        targets.Note(0x9000 + i, 100 + i, 100);
+    }
+    CHECK(targets.Find(119, 100) == 0x9000 + 19);
+    CHECK(targets.Find(1920, 1080) == 0);
+}
+
 void TestSingular() {
     const Mat4 zero{};
     Mat4 r;
@@ -182,6 +206,7 @@ int main() {
     TestStill();
     TestMovingCamera();
     TestFarPlane();
+    TestDepthTargets();
     TestSingular();
     if (failures) {
         std::printf("%d failure(s)\n", failures);

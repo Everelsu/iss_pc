@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Temporal upscaling of the inFAMOUS image, renderer v2. See iss_temporal.h.
-#include "iss_temporal.h"
+#include "iss_temporal_upscaler.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@
 #include "video_core/texture_cache/texture_cache.h"
 
 #include "ffx_vk_portable.h"
+#include "src/iss_temporal.h"
 
 namespace Vulkan::IssTemporal {
 
@@ -49,6 +51,17 @@ struct MotionPush {
     float jitter[2];
 };
 static_assert(sizeof(MotionPush) == 80);
+
+/// The one convention nobody has checked in the running game is the sign of the hook's jitter.
+/// TLG_ISS_TEMPORAL_FLIP=x, y or xy flips those components (for the motion pass and for the backend),
+/// to try the other sign without a rebuild.
+void ApplyJitterFlip(float jitter[2]) {
+    static const char* flip = std::getenv("TLG_ISS_TEMPORAL_FLIP");
+    for (const char* c = flip; c && *c; ++c) {
+        if (*c == 'x') jitter[0] = -jitter[0];
+        if (*c == 'y') jitter[1] = -jitter[1];
+    }
+}
 
 std::string IssueNames(u64 issues) {
     std::string names;
@@ -176,6 +189,8 @@ void Probe(const Instance& instance) {
                     instance.IsStorageImageWriteWithoutFormatEnabled();
     g_available.store(ok, std::memory_order_relaxed);
     LOG_INFO(Render_Vulkan, "IssTemporal: FSR 3.1 {}", ok ? "available" : "unavailable on this device");
+    // The game side keeps its own anti-aliasing until the renderer says it can take over.
+    iss_temporal_set_renderer_ready(ok && TlgSettings::Get().iss_temporal ? 1 : 0);
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -197,7 +212,7 @@ struct Upscaler::Impl {
     bool CreateMotionPipeline();
     bool EnsureTargets(u32 render_width, u32 render_height, u32 output_width, u32 output_height);
     vk::ImageView DepthView(const VideoCore::Image& depth);
-    void Resolve(const Frame& frame);
+    void Resolve(const Frame& frame, const DepthTargets& depth_targets);
     void RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth, const Mat4& reproject,
                       const float jitter[2]);
     void Skip(const char* why);
@@ -253,6 +268,7 @@ void Upscaler::Impl::Skip(const char* why) {
 void Upscaler::Impl::Fail(const char* why) {
     failed = true;
     g_available.store(false, std::memory_order_relaxed);
+    iss_temporal_set_renderer_ready(0);
     LOG_WARNING(Render_Vulkan, "IssTemporal: off for this run ({}); the game keeps its own anti-aliasing", why);
 }
 
@@ -408,16 +424,18 @@ void Upscaler::Impl::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth,
     cmdbuf.dispatch((render_width + 7) / 8, (render_height + 7) / 8, 1);
 }
 
-void Upscaler::Impl::Resolve(const Frame& frame) {
+void Upscaler::Impl::Resolve(const Frame& frame, const DepthTargets& depth_targets) {
     if (failed) {
         return;
     }
-    // The three images the game names, by the address they start at.
+    // The three images, by the address they start at. The hook may not know the scene depth (address 0).
+    const u64 depth_addr = frame.depth_addr ? frame.depth_addr
+                                            : depth_targets.Find(frame.render_width, frame.render_height);
     const auto color_id = texture_cache.FindImageFromRange(frame.color_addr, 1, false);
-    const auto depth_id = texture_cache.FindImageFromRange(frame.depth_addr, 1, false);
+    const auto depth_id = depth_addr ? texture_cache.FindImageFromRange(depth_addr, 1, false) : VideoCore::ImageId{};
     const auto out_id = texture_cache.FindImageFromRange(frame.output_addr, 1, false);
     if (!color_id || !depth_id || !out_id) {
-        Skip("an image the game named is not registered (colour, depth or output)");
+        Skip("an image is not registered (colour, depth or output; no depth target of the render size seen?)");
         return;
     }
     auto& color = texture_cache.GetImage(color_id);
@@ -458,6 +476,8 @@ void Upscaler::Impl::Resolve(const Frame& frame) {
     if (!backend) {
         backend = CreateFsr3Backend(instance);
     }
+    float jitter[2] = {frame.jitter[0], frame.jitter[1]};
+    ApplyJitterFlip(jitter);
     const bool inverted = (frame.flags & kFlagReversedDepth) != 0;
     const bool sizes_changed = !targets_ready || w != render_width || h != render_height || ow != output_width ||
                                oh != output_height;
@@ -531,7 +551,7 @@ void Upscaler::Impl::Resolve(const Frame& frame) {
     barrier(vk::Image(output_image), vk::ImageLayout::eUndefined, all, vk::AccessFlagBits2::eNone,
             vk::ImageLayout::eGeneral, all, rw);
 
-    RecordMotion(cmdbuf, depth_view_now, reproject, frame.jitter);
+    RecordMotion(cmdbuf, depth_view_now, reproject, jitter);
     barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
             vk::AccessFlagBits2::eShaderWrite, vk::ImageLayout::eGeneral, all,
             vk::AccessFlagBits2::eShaderRead);
@@ -548,8 +568,8 @@ void Upscaler::Impl::Resolve(const Frame& frame) {
                      vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
                          vk::ImageUsageFlagBits::eTransferSrc,
                      vk::ImageAspectFlagBits::eColor, ow, oh};
-    params.jitter[0] = frame.jitter[0];
-    params.jitter[1] = frame.jitter[1];
+    params.jitter[0] = jitter[0];
+    params.jitter[1] = jitter[1];
     params.frame_ms = frame_ms;
     params.near_z = frame.near_z;
     params.far_z = frame.far_z;
@@ -597,7 +617,7 @@ Upscaler::Upscaler(const Instance& instance, Scheduler& scheduler, Runtime& runt
 
 Upscaler::~Upscaler() = default;
 
-void Upscaler::OnMarker(const u32* payload, u32 dwords) {
+void Upscaler::OnMarker(const u32* payload, u32 dwords, const DepthTargets& depth_targets) {
     if (!TlgSettings::Get().iss_temporal) {
         return;
     }
@@ -606,7 +626,7 @@ void Upscaler::OnMarker(const u32* payload, u32 dwords) {
         impl->Skip("a malformed marker");
         return;
     }
-    impl->Resolve(frame);
+    impl->Resolve(frame, depth_targets);
 }
 
 } // namespace Vulkan::IssTemporal

@@ -1925,7 +1925,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 // The game hook's marker where the game's own anti-aliasing would have run: the
-                // temporal upscaler takes its place (gpu/iss_temporal.h). The payload is the marker
+                // temporal upscaler takes its place (gpu/iss_temporal_upscaler.h). The payload is the marker
                 // body, the magic included.
                 if ((nop->data_block[0] & Vulkan::IssTemporal::kMarkerMask) == Vulkan::IssTemporal::kMarker) {
                     if (rasterizer) {

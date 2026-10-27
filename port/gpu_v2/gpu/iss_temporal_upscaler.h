@@ -15,6 +15,7 @@
 #include <memory>
 
 #include "common/types.h"
+#include "iss_temporal_math.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image.h"
 
@@ -75,6 +76,8 @@ std::unique_ptr<TemporalBackend> CreateFsr3Backend(const Instance& instance);
 
 /// Whether this device can run the temporal upscaler at all. Evaluated once, when the rasterizer is made.
 bool Available();
+/// Checks the device and tells the game side (iss_temporal_set_renderer_ready) whether markers will be
+/// consumed: with the setting on and a capable device only.
 void Probe(const Instance& instance);
 
 class Upscaler {
@@ -84,8 +87,9 @@ public:
     ~Upscaler();
 
     /// The game's marker reached the command processor (graphics lane, draw pipe drained): `payload`
-    /// is the NOP's body, `dwords` its length. Does nothing unless the setting is on.
-    void OnMarker(const u32* payload, u32 dwords);
+    /// is the NOP's body, `dwords` its length. Does nothing unless the setting is on. `depth_targets`
+    /// finds the scene depth when the marker does not name it.
+    void OnMarker(const u32* payload, u32 dwords, const DepthTargets& depth_targets);
 
 private:
     struct Impl;

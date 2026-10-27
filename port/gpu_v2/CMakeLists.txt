@@ -103,7 +103,7 @@ find_program(GLSLANG_COMPILER NAMES glslang glslangValidator REQUIRED)
 set(SIRIT_USE_SYSTEM_SPIRV_HEADERS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${PORT}/third_party/sirit sirit EXCLUDE_FROM_ALL)
 
-# FSR 3.1 temporal upscaling, native Vulkan (MIT, FireBurn/FSR-Vulkan): gpu/iss_temporal.cpp.
+# FSR 3.1 temporal upscaling, native Vulkan (MIT, FireBurn/FSR-Vulkan): gpu/iss_temporal_upscaler.cpp.
 set(FFX_VK_PORTABLE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(FFX_VK_PORTABLE_BUILD_PROBE OFF CACHE BOOL "" FORCE)
 add_subdirectory(${PORT}/third_party/fsr-vulkan fsr-vulkan EXCLUDE_FROM_ALL)

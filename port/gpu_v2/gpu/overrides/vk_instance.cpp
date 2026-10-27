@@ -531,7 +531,7 @@ bool Instance::CreateDevice() {
                 .shaderImageGatherExtended = features.shaderImageGatherExtended,
                 .shaderStorageImageExtendedFormats = features.shaderStorageImageExtendedFormats,
                 .shaderStorageImageMultisample = features.shaderStorageImageMultisample,
-                // FSR 3 (gpu/iss_temporal.cpp) writes its accumulate output to storage images
+                // FSR 3 (gpu/iss_temporal_upscaler.cpp) writes its accumulate output to storage images
                 // without a declared format.
                 .shaderStorageImageWriteWithoutFormat = features.shaderStorageImageWriteWithoutFormat,
                 .shaderClipDistance = features.shaderClipDistance,

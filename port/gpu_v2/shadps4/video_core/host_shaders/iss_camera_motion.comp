@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Camera motion vectors for the temporal upscaler (gpu/iss_temporal.cpp): every pixel of the scene
+// Camera motion vectors for the temporal upscaler (gpu/iss_temporal_upscaler.cpp): every pixel of the scene
 // depth is taken from this frame's clip space to the previous frame's with one matrix (the previous
 // view-projection times the inverse of this frame's, composed on the CPU in double precision, both
 // without jitter). Output: pixels, previous minus current, which is what FSR expects.
