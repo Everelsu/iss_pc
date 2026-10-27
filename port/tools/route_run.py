@@ -45,19 +45,24 @@ STATS = re.compile(r'Frame stats: ([0-9.]+) FPS, worst frame ([0-9.]+) ms.*?([0-
 LEVELS = re.compile(r'Dynamic quality: level (-?\d+), draw lists max (\d+)/(\d+) KB, (?:automatic floor \d+, )?samples per level(.*)')
 
 
+# Any game of this workspace: only one may be open at a time (a second one falsifies the other's numbers
+# and can exhaust the GPU and the RAM).
+GAME_PROCESSES = ('tlg-probe', 'tlg-probe-v2', 'automodellista')
+
+
 def running():
-    name = 'tlg-probe.exe' if WINDOWS else 'tlg-probe'
     if WINDOWS:
-        out = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {name}'], capture_output=True, text=True).stdout
-        return name.lower() in out.lower()
-    return subprocess.run(['pgrep', '-x', 'tlg-probe'], capture_output=True).returncode == 0
+        out = subprocess.run(['tasklist', '/FO', 'CSV', '/NH'], capture_output=True, text=True).stdout.lower()
+        return any(f'"{name}.exe"' in out for name in GAME_PROCESSES)
+    return any(subprocess.run(['pgrep', '-x', name], capture_output=True).returncode == 0 for name in GAME_PROCESSES)
 
 
 def stop_game():
-    if WINDOWS:
-        subprocess.run(['taskkill', '/F', '/IM', 'tlg-probe.exe'], capture_output=True)
-    else:
-        subprocess.run(['pkill', '-TERM', '-x', 'tlg-probe'], capture_output=True)
+    for name in ('tlg-probe', 'tlg-probe-v2'):   # only this port's games: never the other agent's
+        if WINDOWS:
+            subprocess.run(['taskkill', '/F', '/IM', f'{name}.exe'], capture_output=True)
+        else:
+            subprocess.run(['pkill', '-TERM', '-x', name], capture_output=True)
 
 
 def newest_log(before):
@@ -98,7 +103,7 @@ def main(argv):
         if not path.exists():
             sys.exit(f'missing {what}: {path}')
     if running():
-        sys.exit('a tlg-probe is already running: not starting a second game')
+        sys.exit('a game is already running (tlg-probe, tlg-probe-v2 or automodellista): not starting a second one')
     shutil.rmtree(USER / 'savedata', ignore_errors=True)
     shutil.copytree(SAVE / 'savedata', USER / 'savedata')
     OUT.mkdir(parents=True, exist_ok=True)
@@ -114,7 +119,13 @@ def main(argv):
     LOGS.mkdir(parents=True, exist_ok=True)
     before = max((p.name for p in LOGS.glob('run-*.log')), default='')
     started = time.time()
-    runner = subprocess.Popen([sys.executable, str(PORT / 'launcher' / 'infamous_launcher.py'), '--play', '0'],
+    # The launcher's own vsync setting (default on) is written to tlg.ini at every start and caps the
+    # frame rate at the monitor's: a measurement turns it off, and the FPS counter on (ISS_ROUTE_VSYNC=1 keeps it).
+    vsync = os.environ.get('ISS_ROUTE_VSYNC') == '1'
+    play = ("import sys; sys.path.insert(0, %r); import infamous_run as r; o = r.load_settings; "
+            "r.load_settings = lambda: dict(o(), vsync=%r, show_fps=True); sys.exit(r.main(['0']))"
+            % (str(PORT / 'launcher'), vsync))
+    runner = subprocess.Popen([sys.executable, '-c', play],
                               env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log, finished = None, False
     limit = float(os.environ.get('ISS_ROUTE_WAIT', 900))
