@@ -538,6 +538,31 @@ void Upscaler::Impl::Resolve(const Frame& frame, const DepthTargets& depth_targe
     const vk::ImageView depth_view_now = DepthView(depth);
     const auto cmdbuf = scheduler.CommandBuffer();
 
+    // TLG_ISS_TEMPORAL_PASS=1 (diagnosis): the game's anti-aliasing input is copied straight to its output,
+    // with no FSR. If the picture is still wrong, the input is not what the game's pass would have written.
+    static const bool pass_through = [] {
+        const char* value = std::getenv("TLG_ISS_TEMPORAL_PASS");
+        return value && value[0] == '1';
+    }();
+    if (pass_through) {
+        runtime.Transit(&color, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eAllTransfer,
+                        vk::AccessFlagBits2::eTransferRead);
+        runtime.Transit(&target, vk::ImageLayout::eTransferDstOptimal, vk::PipelineStageFlagBits2::eAllTransfer,
+                        vk::AccessFlagBits2::eTransferWrite);
+        runtime.FlushBarriers();
+        const vk::ImageBlit copy{
+            .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .srcOffsets = std::array<vk::Offset3D, 2>{vk::Offset3D{0, 0, 0}, vk::Offset3D{static_cast<s32>(w), static_cast<s32>(h), 1}},
+            .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .dstOffsets = std::array<vk::Offset3D, 2>{vk::Offset3D{0, 0, 0}, vk::Offset3D{static_cast<s32>(ow), static_cast<s32>(oh), 1}},
+        };
+        cmdbuf.blitImage(color.GetImage(), vk::ImageLayout::eTransferSrcOptimal, target.GetImage(),
+                         vk::ImageLayout::eTransferDstOptimal, copy, vk::Filter::eNearest);
+        target.flags |= VideoCore::ImageFlagBits::GpuModified;
+        target.flags &= ~VideoCore::ImageFlagBits::Dirty;
+        return;
+    }
+
     const auto all = vk::PipelineStageFlagBits2::eAllCommands;
     const auto rw = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
     const auto barrier = [&](vk::Image image, vk::ImageLayout old_layout, vk::PipelineStageFlags2 src_stage,
@@ -618,7 +643,9 @@ void Upscaler::Impl::Resolve(const Frame& frame, const DepthTargets& depth_targe
     previous_frame_id = frame.frame_id;
     have_previous = true;
     if (resolved++ == 0) {
-        LOG_INFO(Render_Vulkan, "IssTemporal: first frame resolved ({}x{}, {})", w, h, backend->Name());
+        LOG_INFO(Render_Vulkan, "IssTemporal: first frame resolved ({}x{}, {}); colour {}, depth {}, output {}", w, h,
+                 backend->Name(), vk::to_string(color.info.pixel_format), vk::to_string(depth.info.pixel_format),
+                 vk::to_string(target.info.pixel_format));
     }
 }
 
