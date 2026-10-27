@@ -10,6 +10,7 @@ from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 from . import gfxlogic, logic, report
 from .logic import backports_table, shader_cache, tlg_run
 from .rowsmodel import RowsModel
+import native_resolution  # noqa: E402  (launcher/native_resolution.py: output + internal resolution)
 import preset_share  # noqa: E402  (launcher/preset_share.py; logic put the folder on sys.path)
 
 # (id, kind, live) of the options kept in settings.json. live: also in the Insert menu.
@@ -31,6 +32,7 @@ OVERLAY_IDS = tuple(i.id for i in backports_table.MENU if i.tab == 'Overlay')
 # Two-value choices shown here as a switch: id -> (value when off, value when on, label key).
 SWITCH_CHOICES = {'TLG_RENDERER': ('1', '2', 'gfx_renderer_v2')}
 SECTIONS = (
+    ('nat_section', ('n:output', 'n:internal')),
     ('gfx_sec_renderer', ('TLG_RENDERER', 'TLG_NATIVE_PASSES')),
     ('gfx_sec_image', ('s:display_mode', 's:vsync', 'menu:fsr1', 'menu:rcas', 'menu:rcas_strength',
                         'TLG_BARRIER_MERGE')),
@@ -139,6 +141,53 @@ class Graphics(QObject):
             row['index'] = next((i for i, (n, _) in enumerate(options) if n == str(value)), 0)
         return row
 
+    # -- output and internal resolution (tlg.ini: iss_native_output, iss_native_percent) ---------------
+    def _renderer_v2(self):
+        """Same test as infamous_run.renderer_v2, on the states the screen already holds."""
+        return backports_table.effective(gfxlogic.item_by_id('TLG_RENDERER'), self.backend.fix_states) == '2'             and tlg_run.V2_PROBE.is_file()
+
+    def _native_row(self, rid):
+        output, percent = native_resolution.read(tlg_run.read_ini(tlg_run.user_dir() / 'tlg.ini'))
+        t = self.backend.t_
+        v2 = self._renderer_v2()
+        row = {'kind': 'item', 'id': rid, 'code': '', 'label': '', 'what': '', 'tags': [self._tag(False)],
+               'shaderWarn': '', 'changed': False, 'control': 'combo', 'on': False, 'options': [], 'index': 0,
+               'lo': 0, 'hi': 0, 'step': 1, 'unit': '', 'value': 0, 'valueText': '', 'disabled': not v2,
+               'decimals': 0, 'note': '' if v2 else self.t('nat_needs_v2'), 'info': '', 'action': None}
+        if rid == 'n:output':
+            options = native_resolution.output_options(t)
+            row.update(label=self.t('nat_output'), what=self.t('nat_output_what'), changed=output != 0,
+                       options=[{'value': v, 'label': label} for v, label in options], index=output)
+            return row
+        options = native_resolution.internal_options(t, output, percent)
+        current = native_resolution.internal_value(output, percent)
+        text, tone = native_resolution.summary(t, output, percent)
+        row.update(label=self.t('nat_internal'), what=self.t('nat_internal_what'), changed=percent != 100,
+                   options=[{'value': v, 'label': label} for v, label, _ in options],
+                   index=next((n for n, (v, _, _) in enumerate(options) if v == current), 0),
+                   disabled=not v2 or not output)
+        if v2:        # the summary says what the next start does; a warning or a refusal goes in the note
+            if output:
+                text += ' ' + self.t('nat_restart')
+            row['note' if tone != 'info' else 'info'] = text
+        return row
+
+    def _set_native(self, rid, value):
+        path = tlg_run.user_dir() / 'tlg.ini'
+        output, percent = native_resolution.read(tlg_run.read_ini(path))
+        if rid == 'n:output':
+            new_output = int(value)
+            percent = native_resolution.retarget(output, percent, new_output)
+            output = new_output
+        elif value != 'custom':
+            status, best, *_ = native_resolution.pick(output, int(value))
+            if status != native_resolution.PICK_OK:      # the game would refuse it: keep what is stored
+                self.rebuild()
+                return
+            percent = best
+        native_resolution.save(path, output, percent)
+        self.rebuild()
+
     def _item_row(self, rid):
         item = gfxlogic.item_by_id(rid)
         states = self.backend.fix_states
@@ -185,14 +234,17 @@ class Graphics(QObject):
                 if rid in seen:
                     continue
                 seen.add(rid)
-                rows.append(self._setting_row(rid) if rid.startswith('s:') else self._item_row(rid))
+                rows.append(self._setting_row(rid) if rid.startswith('s:') else
+                            self._native_row(rid) if rid.startswith('n:') else self._item_row(rid))
         self.model.set_rows(rows)
         self.changed.emit()
 
     # -- writing ----------------------------------------------------------------------------------------
     @Slot(str, str)
     def setValue(self, rid, value):
-        if rid in SETTING_ROWS:
+        if rid.startswith('n:'):
+            self._set_native(rid, value)
+        elif rid in SETTING_ROWS:
             key, control, _ = SETTING_ROWS[rid]
             if control == 'switch':
                 self.settings[key] = value == '1'

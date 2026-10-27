@@ -797,17 +797,63 @@ int RestartChanges() {
 void NativeRenderingTab() {
     auto& s=TlgSettings::Get();
     ImGui::TextWrapped("Experimental native 3D rendering for CUSA00223 update 1.07. Changes apply after closing and relaunching the game.");
-    const char* outputs[]={"Off (original game)","1920 x 1080","2560 x 1440","3440 x 1440 (ultrawide)","3840 x 2160 (4K)","5120 x 1440 (super ultrawide)"};
+    const char* outputs[]={TL("Off (original game)","Desligado (jogo original)"),"1080p  1920 x 1080","1440p  2560 x 1440",
+        "3440 x 1440 (21:9)","4K  3840 x 2160","5120 x 1440 (32:9)"};
     int output=s.iss_native_output, percent=s.iss_native_percent;
     bool edges=s.iss_native_hud_edges;
-    if(ImGui::Combo("Output resolution",&output,outputs,ISS_NATIVE_PRESETS)){s.iss_native_output=output;dirty=true;}
-    if(ImGui::SliderInt("Native render scale",&percent,25,200,"%d%%")){s.iss_native_percent=percent;dirty=true;}
+    // Output first; the internal resolution is a scene height (iss_native_pick in
+    // iss_native_resolution.h, the same arithmetic as the launchers), stored as the percent the game reads.
+    if(ImGui::Combo(TL("Output","Saída"),&output,outputs,ISS_NATIVE_PRESETS)){
+        s.iss_native_percent=percent=iss_native_retarget(s.iss_native_output,percent,output);
+        s.iss_native_output=output;dirty=true;
+    }
+    const int step=output?iss_native_step_for_percent(output,percent):-1;
+    char preview[96];
+    if(!output)std::snprintf(preview,sizeof(preview),"-");
+    else if(step>=0)std::snprintf(preview,sizeof(preview),"%up",iss_native_step_heights[step]);
+    else std::snprintf(preview,sizeof(preview),TL("Custom (%d%%)","Personalizada (%d%%)"),percent);
+    ImGui::BeginDisabled(!output);
+    if(ImGui::BeginCombo(TL("Internal resolution","Resolução interna"),preview)){
+        for(int i=0;i<ISS_NATIVE_STEPS;i++){
+            IssNativePick pick;const int status=iss_native_pick(output,iss_native_step_heights[i],&pick);
+            char label[128];
+            if(status==ISS_NATIVE_PICK_OK)
+                std::snprintf(label,sizeof(label),pick.error?TL("%up  about %u x %u (%d%%)","%up  cerca de %u x %u (%d%%)"):"%up  %u x %u (%d%%)",
+                              iss_native_step_heights[i],pick.width,pick.height,pick.percent);
+            else if(status==ISS_NATIVE_PICK_BUDGET)
+                std::snprintf(label,sizeof(label),TL("%up  over the 4K limit","%up  acima do limite de 4K"),iss_native_step_heights[i]);
+            else std::snprintf(label,sizeof(label),TL("%up  out of range for this output","%up  fora do alcance desta saída"),iss_native_step_heights[i]);
+            ImGui::BeginDisabled(status!=ISS_NATIVE_PICK_OK);
+            if(ImGui::Selectable(label,i==step)){s.iss_native_percent=percent=pick.percent;dirty=true;}
+            ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if(ImGui::SliderInt(TL("Custom scale (fine adjustment)","Escala personalizada (ajuste fino)"),&percent,25,200,"%d%%")){s.iss_native_percent=percent;dirty=true;}
     if(ImGui::Checkbox("Place HUD at screen edges",&edges)){s.iss_native_hud_edges=edges;dirty=true;}
-    ImGui::TextWrapped("100%% renders the scene at the exact selected resolution. Lower scales reduce scene resolution. The vertical field of view stays the same; wider displays show more world horizontally. Uncheck edge HUD to keep it centered within 16:9.");
+    ImGui::TextWrapped("%s",TL("Pick the output (what is shown) and the internal resolution (what the 3D scene is drawn at): for example 720p inside a 1440p output renders less and shows more. The vertical field of view stays the same; wider displays show more world horizontally. Uncheck edge HUD to keep it centered within 16:9.",
+        "Escolha a saída (o que aparece) e a resolução interna (o tamanho em que a cena 3D é desenhada): por exemplo 720p dentro de uma saída 1440p desenha menos e mostra mais. O campo de visão vertical continua o mesmo; telas mais largas mostram mais mundo na horizontal. Desmarque o HUD nas bordas para manter o HUD centralizado em 16:9."));
     IssNativePlan requested;
-    if(output && iss_native_plan({output,percent,int(edges)},&requested))
-        ImGui::Text("Next launch: %u x %u scene, %u lighting entries",requested.width,requested.height,requested.light_entries);
-    else if(output)ImGui::TextWrapped("This scale exceeds the supported 4K pixel budget. Choose a smaller scale; this request will be refused at startup.");
+    if(!output)ImGui::TextWrapped("%s",TL("Original game rendering. Pick an output to render natively.","Renderização do jogo original. Escolha uma saída para renderizar nativamente."));
+    else if(iss_native_plan({output,percent,int(edges)},&requested)){
+        ImGui::Text(TL("Next launch: scene %u x %u -> output %u x %u (%d%%), %u lighting entries","Próxima partida: cena %u x %u -> saída %u x %u (%d%%), %u entradas de iluminação"),
+                    requested.width,requested.height,requested.output_width,requested.output_height,percent,requested.light_entries);
+        if(step>=0){
+            IssNativePick pick;iss_native_pick(output,iss_native_step_heights[step],&pick);
+            if(pick.error){
+                ImGui::TextWrapped(TL("Not exact: %up is not a whole percent of this output (%+d px). It is exact on:","Não é exato: %up não é um percentual inteiro desta saída (%+d px). É exato em:"),
+                                   iss_native_step_heights[step],int(pick.error));
+                for(int other=1;other<ISS_NATIVE_PRESETS;other++){
+                    IssNativePick exact;
+                    if(other!=output&&iss_native_pick(other,iss_native_step_heights[step],&exact)==ISS_NATIVE_PICK_OK&&!exact.error)
+                        ImGui::BulletText("%s  %d%%",outputs[other],exact.percent);
+                }
+            }
+        }
+    }else ImGui::TextWrapped("%s",TL("This scale is over the 4K pixel limit: the game would refuse it at startup and run unchanged. Pick a lower internal resolution.",
+        "Esta escala passa do limite de pixels de 4K: o jogo a recusaria na partida e abriria sem mudança. Escolha uma resolução interna menor."));
+    ImGui::TextWrapped("%s",TL("Takes effect the next time the game starts.","Vale na próxima vez que o jogo iniciar."));
     ImGui::Separator();
     ImGui::TextWrapped("%s",runtime_native_reason());
     const int exclusive=s.exclusive_status;

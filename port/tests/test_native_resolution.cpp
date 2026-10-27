@@ -7,6 +7,7 @@
 #include <iterator>
 #include <vector>
 #include <algorithm>
+#include <string>
 static uint32_t read32(const unsigned char* p){uint32_t x;memcpy(&x,p,4);return x;}
 static uint64_t read64(const unsigned char* p){uint64_t x;memcpy(&x,p,8);return x;}
 static void fixture(std::vector<unsigned char>& image){
@@ -15,7 +16,32 @@ static void fixture(std::vector<unsigned char>& image){
     memcpy(image.data()+0x58030c,iss_native_projection,sizeof(iss_native_projection));
     memcpy(image.data()+0x5802e6,iss_native_aspect_width,sizeof(iss_native_aspect_width));
 }
+// tests/native_resolution_cases.txt is shared with test_native_resolution_launcher.py (the launchers'
+// copy of this arithmetic): both must give the same answers.
+static unsigned shared_cases(){
+    std::string path=__FILE__;path=path.substr(0,path.find_last_of("/\\")+1)+"native_resolution_cases.txt";
+    std::ifstream in(path);assert(in);unsigned count=0;std::string line;
+    while(std::getline(in,line)){
+        if(line.empty()||line[0]=='#')continue;
+        char kind[16];int a=0,b=0,c=0,d=0,e=0,f=0,g=0;
+        if(sscanf(line.c_str(),"plan %d %d -> %d %d",&a,&b,&c,&d)==4){
+            IssNativePlan p;assert(iss_native_plan({a,b,1,0},&p)&&int(p.width)==c&&int(p.height)==d);
+        }else if(sscanf(line.c_str(),"plan %d %d -> %15s",&a,&b,kind)==3){
+            IssNativePlan p;assert(!strcmp(kind,"refused")&&!iss_native_plan({a,b,1,0},&p));
+        }else if(sscanf(line.c_str(),"pick %d %d -> %d %d %d %d %d",&a,&b,&c,&d,&e,&f,&g)==7){
+            IssNativePick r;assert(iss_native_pick(a,uint32_t(b),&r)==c);
+            assert(r.percent==d&&int(r.width)==e&&int(r.height)==f&&r.error==g);
+        }else if(sscanf(line.c_str(),"step %d %d -> %d",&a,&b,&c)==3){
+            assert(iss_native_step_for_percent(a,b)==c);
+        }else if(sscanf(line.c_str(),"retarget %d %d %d -> %d",&a,&b,&c,&d)==4){
+            assert(iss_native_retarget(a,b,c)==d);
+        }else assert(!"unknown line in native_resolution_cases.txt");
+        count++;
+    }
+    return count;
+}
 int main(int argc,char** argv){
+    assert(shared_cases()>=60);
     IssNativePlan p;
     for(int output=1;output<ISS_NATIVE_PRESETS;output++){
         assert(iss_native_plan({output,100,1},&p));

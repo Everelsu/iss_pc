@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / 'launcher'))
 from qt import logic  # noqa: E402
 from qt import gfxlogic  # noqa: E402
 import backports_table  # noqa: E402
+import native_resolution  # noqa: E402
 import padsettings  # noqa: E402
 
 try:
@@ -490,6 +491,23 @@ class ControllerTests(unittest.TestCase):
         self.assertNotIn('fps_limit', self.ini_text())
         row = self.graphics.model.get('menu:fps_limit')
         self.assertEqual('0', row['options'][row['index']]['value'])
+
+    def test_output_and_internal_resolution_write_the_game_keys(self):
+        self.assertEqual(['n:output', 'n:internal'], [r['id'] for r in self.graphics.model.rows[1:3]])
+        self.assertTrue(self.graphics.model.get('n:output')['disabled'])          # not renderer v2 here
+        self.assertIn('renderer v2', self.graphics.model.get('n:output')['note'])
+        with mock.patch.object(self.graphics, '_renderer_v2', return_value=True):
+            self.graphics.setValue('n:output', '2')
+            self.graphics.setValue('n:internal', '720')
+            self.assertIn('iss_native_output=2', self.ini_text())
+            self.assertIn('iss_native_percent=50', self.ini_text())
+            self.assertIn('1280', self.graphics.model.get('n:internal')['info'])
+            self.graphics.setValue('n:output', '1')               # 720p stays 720p on 1080p: 67%
+            self.assertIn('iss_native_percent=67', self.ini_text())
+            self.assertIn('Not exact', self.graphics.model.get('n:internal')['note'])
+            self.graphics.setValue('n:output', '5')
+            self.graphics.setValue('n:internal', '2160')         # over the pixel budget: refused, unchanged
+            self.assertEqual(50, native_resolution.read(logic.tlg_run.read_ini(self.ini))[1])
 
     def test_a_row_changed_on_the_fixes_screen_shows_here(self):
         self.backend.setFix('TLG_STALE_READBACK', '1')

@@ -58,6 +58,10 @@ static inline int iss_native_config(FILE *f, IssNativeConfig *c) {
     }
     return valid;
 }
+/* One output dimension scaled by `percent`, rounded to an even pixel count. */
+static inline uint32_t iss_native_scale(uint32_t dimension,int percent) {
+    return (uint32_t)(((uint64_t)dimension*percent+100)/200)*2;
+}
 static inline int iss_native_plan(IssNativeConfig c, IssNativePlan *p) {
     memset(p,0,sizeof(*p));
     if(c.output<=0 || c.output>=ISS_NATIVE_PRESETS || c.percent<25 || c.percent>200 ||
@@ -66,8 +70,8 @@ static inline int iss_native_plan(IssNativeConfig c, IssNativePlan *p) {
     /* At 100% these are EXACT output pixels, never an upscale-only 16:9 image.
      * Other percentages round to even pixels; Vulkan tiling alignment is handled
      * by the game's surface allocator, not by changing the visible dimensions. */
-    p->width=(uint32_t)(((uint64_t)p->output_width*c.percent+100)/200)*2;
-    p->height=(uint32_t)(((uint64_t)p->output_height*c.percent+100)/200)*2;
+    p->width=iss_native_scale(p->output_width,c.percent);
+    p->height=iss_native_scale(p->output_height,c.percent);
     if (!p->width || !p->height || (uint64_t)p->width*p->height>3840u*2160u) {
         memset(p,0,sizeof(*p)); return 0;
     }
@@ -87,6 +91,54 @@ static inline int iss_native_plan(IssNativeConfig c, IssNativePlan *p) {
     p->light_entries=(uint32_t)(entries<0x320000 ? 0x320000 : entries);
     p->percent=c.percent; p->hud_edges=c.hud_edges;p->ui_16_9=c.ui_16_9;
     return 1;
+}
+/* ---- Internal resolution as a height (shared by the launchers and the in-game menu) ----
+ * The ini keeps only the output preset and the percent; the player thinks in "render 720p,
+ * show 1440p". iss_native_pick() turns a wanted scene height into the percent to store (the
+ * closest the integer percent allows, lowest percent on a tie), and reports an inexact result and
+ * a refused request instead of hiding them. port/launcher/native_resolution.py is the same
+ * arithmetic and tests/native_resolution_cases.txt feeds both. */
+enum { ISS_NATIVE_STEPS = 6 };
+static const uint32_t iss_native_step_heights[ISS_NATIVE_STEPS] = {540,720,900,1080,1440,2160};
+enum { ISS_NATIVE_PICK_OK = 1, ISS_NATIVE_PICK_BUDGET = 0, ISS_NATIVE_PICK_RANGE = -1, ISS_NATIVE_PICK_OUTPUT = -2 };
+typedef struct { int percent; uint32_t width, height; int32_t error; } IssNativePick;
+static inline int iss_native_pick(int output,uint32_t target_height,IssNativePick *r) {
+    memset(r,0,sizeof(*r));
+    if (output<=0 || output>=ISS_NATIVE_PRESETS) return ISS_NATIVE_PICK_OUTPUT;
+    const uint32_t out_h=iss_native_heights[output];
+    if ((uint64_t)target_height*100<(uint64_t)out_h*25 || (uint64_t)target_height*100>(uint64_t)out_h*200)
+        return ISS_NATIVE_PICK_RANGE;
+    int best=25; int64_t best_error=-1;
+    for (int percent=25;percent<=200;percent++) {
+        int64_t error=(int64_t)iss_native_scale(out_h,percent)-(int64_t)target_height;
+        if (error<0) error=-error;
+        if (best_error<0 || error<best_error) {best=percent;best_error=error;}
+    }
+    r->percent=best;
+    r->width=iss_native_scale(iss_native_widths[output],best);
+    r->height=iss_native_scale(out_h,best);
+    r->error=(int32_t)r->height-(int32_t)target_height;
+    IssNativePlan plan;
+    return iss_native_plan((IssNativeConfig){output,best,1,0},&plan) ? ISS_NATIVE_PICK_OK : ISS_NATIVE_PICK_BUDGET;
+}
+/* The step (index into iss_native_step_heights) that a stored percent stands for on this output,
+ * or -1 when the percent matches none (a hand-edited ini). */
+static inline int iss_native_step_for_percent(int output,int percent) {
+    IssNativePick pick;
+    for (int i=0;i<ISS_NATIVE_STEPS;i++) {
+        const int status=iss_native_pick(output,iss_native_step_heights[i],&pick);
+        if ((status==ISS_NATIVE_PICK_OK || status==ISS_NATIVE_PICK_BUDGET) && pick.percent==percent) return i;
+    }
+    return -1;
+}
+/* The percent to store when the output changes, so that "render 720p" stays 720p: the step the
+ * old percent stood for is picked again on the new output. A percent that is no step, an unusable
+ * new output or a refused result leaves the percent as it was. */
+static inline int iss_native_retarget(int old_output,int percent,int new_output) {
+    const int step=iss_native_step_for_percent(old_output,percent);
+    IssNativePick pick;
+    if (step<0 || iss_native_pick(new_output,iss_native_step_heights[step],&pick)!=ISS_NATIVE_PICK_OK) return percent;
+    return pick.percent;
 }
 static inline void iss_native_write32(unsigned char *p,uint32_t x) {memcpy(p,&x,4);}
 static inline void iss_native_changes(const IssNativePlan *p,IssNativeSite sites[ISS_NATIVE_SITE_COUNT]) {
