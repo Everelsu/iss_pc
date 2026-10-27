@@ -41,6 +41,10 @@ extern "C" void runtime_restart(void); // src/probe.c: starts run.py again, ends
 #include "tlg_overlay_scale.h"
 #ifdef TLG_RENDERER_V2
 #include "../../src/iss_native_resolution.h"
+#include "../../src/iss_native_live.h"
+#include "../../src/iss_power_wheel.h"
+#include "tlg_power_art.h"
+#include "tlg_trophies.h"
 extern void TlgKarmaMenu();
 #endif
 #include "imgui_internal.h" // RegisterUserTexture (save pictures)
@@ -633,6 +637,65 @@ void OpenGuide(); // the graffiti guide (below, with the save dialogs)
 extern "C" int runtime_mouse_aim_installed(void);
 void ControlsTab() {
     auto& s = TlgSettings::Get();
+#ifdef TLG_RENDERER_V2
+    IssPowerWheelStatus power_status{};runtime_power_wheel_status(&power_status);
+    if(power_status.supported){
+        ImGui::SeparatorText("Power switching test");
+        ImGui::TextWrapped("Switches apply after closing Insert. Every switch carries the current energy percentage and missile count, capped to the new power's capacity. Switching never refills resources.");
+        static const char *names[]={"Smoke","Neon","Video","Concrete"};
+        bool power_enabled=s.iss_power_switch_enabled;
+        if(ImGui::Checkbox("Enable quick power switching",&power_enabled)){
+            s.iss_power_switch_enabled=power_enabled;TlgSettings::Save();
+            if(!power_enabled)runtime_power_wheel_request(-1);
+        }
+        bool instant=s.iss_power_instant;
+        if(ImGui::Checkbox("Switch immediately on stick direction",&instant)){
+            s.iss_power_instant=instant;runtime_power_wheel_request(-1);TlgSettings::Save();
+        }
+        ImGui::TextWrapped(instant?"D-pad Down + a quick stick flick switches immediately. Keep holding to open the wheel; release D-pad Down to confirm its final highlight. Left Smoke, up Neon, right Video, down Concrete.":
+            "Hold D-pad Down for the wheel, choose with the right stick, then release. Hold the stick centered briefly to cancel. A quick tap keeps the normal D-pad action.");
+        ImGui::TextUnformatted("Keyboard defaults: F5 / F6 / F7 / F8.");
+        float wheel_glow=s.iss_power_glow;
+        if(ImGui::SliderFloat("Wheel glow",&wheel_glow,0.5f,3.0f,"%.2fx")){
+            s.iss_power_glow=wheel_glow;
+        }
+        if(ImGui::IsItemDeactivatedAfterEdit())TlgSettings::Save();
+        ImGui::TextWrapped("With the wheel open, use the right stick, arrow keys or mouse to highlight a power. Keyboard/mouse: hold K (the default D-pad Down binding) to open it.");
+        for(int i=0;i<4;i++){
+            if(i)ImGui::SameLine();
+            ImGui::BeginDisabled(!power_enabled||!power_status.ready||!(power_status.unlocked_mask&(1<<i)));
+            if(ImGui::Button(names[i]))runtime_power_wheel_request(i);
+            ImGui::EndDisabled();
+        }
+        static char key_names[4][40]{};
+        static bool key_names_ready=false;
+        static const char *key_problem="";
+        if(!key_names_ready){
+            for(int i=0;i<4;i++)std::snprintf(key_names[i],sizeof(key_names[i]),"%s",SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[i].load())));
+            key_names_ready=true;
+        }
+        ImGui::TextUnformatted("Shortcut keys: edit a key name, then click Apply or leave the field. Use an unused key.");
+        for(int i=0;i<4;i++){
+            ImGui::PushID(i);ImGui::SetNextItemWidth(100.0f*base_scale);
+            bool apply=ImGui::InputText(names[i],key_names[i],sizeof(key_names[i]),ImGuiInputTextFlags_EnterReturnsTrue);
+            apply=ImGui::IsItemDeactivatedAfterEdit()||apply;
+            ImGui::SameLine();apply=ImGui::Button("Apply")||apply;
+            if(apply){
+                SDL_Scancode code=SDL_GetScancodeFromName(key_names[i]);
+                bool valid=code!=SDL_SCANCODE_UNKNOWN&&code!=SDL_SCANCODE_INSERT&&code!=SDL_SCANCODE_ESCAPE&&
+                    code!=SDL_SCANCODE_F9&&code!=SDL_SCANCODE_F10&&code!=SDL_SCANCODE_F11;
+                for(int j=0;j<4;j++)if(j!=i&&s.iss_power_keys[j]==int(code))valid=false;
+                if(valid){s.iss_power_keys[i]=int(code);TlgSettings::Save();key_problem="";}
+                else key_problem="Key not applied: use a valid, distinct key. Insert, Escape and F9-F11 are reserved.";
+            }
+            ImGui::SameLine();ImGui::Text("Active: %s",SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[i].load())));
+            ImGui::PopID();
+        }
+        if(*key_problem)ImGui::TextWrapped("%s",key_problem);
+        if(power_status.error)ImGui::Text("Switching stopped after verification error %d. Reload the copied save.",power_status.error);
+        else if(power_status.pending)ImGui::TextUnformatted("Switch queued for gameplay.");
+    }
+#endif
     // Mouse (src/runtime_pad.c): the camera settings apply at once. The buttons and the touchpad
     // mode are fixed unless TLG_KEY_MAP / TLG_MOUSE_PAD_* (or tlg.ini key_map) change them.
     ImGui::SeparatorText(TL("Mouse", "Mouse"));
@@ -646,17 +709,7 @@ void ControlsTab() {
         CheckRow(TL("Invert Y axis", "Inverter eixo Y"), s.mouse_invert_y,
                  TL("Moving the mouse forward looks down.", "Empurrar o mouse para frente olha para baixo."));
         const bool direct_mouse=runtime_mouse_aim_installed()!=0;
-        if(direct_mouse)InfoRow(TL("Camera input", "Entrada da câmera"),TL("Direct mouse (experimental)","Mouse direto (experimental)"));
-        ImGui::BeginDisabled(direct_mouse);
-        FloatRow(TL("Smoothing", "Suavização"), s.mouse_smoothing, 0.0f, 0.9f, "%.2f",
-                 TL("Evens out the camera motion; higher values feel softer and a little slower.",
-                    "Deixa o movimento da câmera mais uniforme; valores altos ficam mais suaves e um pouco mais lentos."));
-        FloatRow(TL("Acceleration", "Aceleração"), s.mouse_accel, 0.0f, 2.0f, "%.2f",
-                 TL("Fast movements turn more than slow ones. 0 is linear.", "Movimentos rápidos giram mais que os lentos. 0 é linear."));
-        FloatRow(TL("Anti-dead zone", "Anti-zona morta"), s.mouse_deadzone, 0.0f, 0.5f, "%.2f",
-                 TL("Small mouse movements skip the game's stick dead zone. Raise it if slow movements do nothing.",
-                    "Movimentos pequenos do mouse pulam a zona morta do analógico do jogo. Aumente se movimentos lentos não fizerem nada."));
-        ImGui::EndDisabled();
+        InfoRow(TL("Camera input", "Entrada da câmera"),direct_mouse?"Direct mouse":"Direct mouse unavailable - see run log");
         ImGui::EndDisabled();
         InfoRow(TL("Left / right / middle", "Esquerdo / direito / do meio"), "R2 / L2 / R3");
         InfoRow(TL("Touchpad mode", "Modo touchpad"), TL("hold Left Ctrl or Mouse X1", "segure Ctrl esquerdo ou botão X1 do mouse"));
@@ -762,17 +815,35 @@ int RestartChanges() {
 #ifdef TLG_RENDERER_V2
 void NativeRenderingTab() {
     auto& s=TlgSettings::Get();
-    ImGui::TextWrapped("Experimental native 3D rendering for CUSA00223 update 1.07. Changes apply after closing and relaunching the game.");
+    if(const char* test=std::getenv("ISS_NATIVE_LIVE_REBUILD_TEST");test&&!std::strcmp(test,"1")){
+        ImGui::TextWrapped("Diagnostic: rebuild at the CURRENT resolution using the game's own path. This does not apply a new resolution.");
+        int state=runtime_native_live_rebuild_state();ImGui::BeginDisabled(state==1||state==2);
+        if(ImGui::Button("Test current-resolution rebuild"))runtime_native_live_rebuild_request();
+        ImGui::EndDisabled();ImGui::Text("Rebuild check: %s",state==3?"verified":state==2?"rebuilding":state==1?"queued":state<0?"not confirmed":"not run");
+    }
+    const bool live_native=runtime_native_live_enabled()!=0;
+    ImGui::TextWrapped("%s",live_native?"Experimental live native rendering. Select a resolution or release the scale slider to queue a safe rebuild. Larger allocations still require restarting this candidate.":"Experimental native 3D rendering for CUSA00223 update 1.07. Changes apply after closing and relaunching the game.");
     const char* outputs[]={"Off (original game)","1920 x 1080","2560 x 1440","3440 x 1440 (ultrawide)","3840 x 2160 (4K)","5120 x 1440 (super ultrawide)"};
     int output=s.iss_native_output, percent=s.iss_native_percent;
     bool edges=s.iss_native_hud_edges;
-    if(ImGui::Combo("Output resolution",&output,outputs,ISS_NATIVE_PRESETS)){s.iss_native_output=output;dirty=true;}
+    const bool output_changed=ImGui::Combo("Output resolution",&output,outputs,ISS_NATIVE_PRESETS);
+    if(output_changed){s.iss_native_output=output;dirty=true;}
     if(ImGui::SliderInt("Native render scale",&percent,25,200,"%d%%")){s.iss_native_percent=percent;dirty=true;}
-    if(ImGui::Checkbox("Place HUD at screen edges",&edges)){s.iss_native_hud_edges=edges;dirty=true;}
+    const bool scale_released=ImGui::IsItemDeactivatedAfterEdit();
+    const bool edges_changed=ImGui::Checkbox("Place HUD at screen edges",&edges);
+    if(edges_changed){s.iss_native_hud_edges=edges;dirty=true;}
+    // Native choices can apply while the overlay stays open. Persist committed
+    // edits now: closing the game directly need not pass through SetOpen(false).
+    // Slider drags still write only once, on release.
+    if(output_changed||scale_released||edges_changed)TlgSettings::Save();
+    if(live_native&&(output_changed||scale_released||edges_changed))
+        runtime_native_live_request_config({output,percent,int(edges),s.iss_native_ui_16_9.load()});
+    if(live_native)ImGui::TextWrapped("%s",runtime_native_live_reason());
     ImGui::TextWrapped("100%% renders the scene at the exact selected resolution. Lower scales reduce scene resolution. The vertical field of view stays the same; wider displays show more world horizontally. Uncheck edge HUD to keep it centered within 16:9.");
-    IssNativePlan requested;
-    if(output && iss_native_plan({output,percent,int(edges)},&requested))
-        ImGui::Text("Next launch: %u x %u scene, %u lighting entries",requested.width,requested.height,requested.light_entries);
+    IssNativePlan requested{};
+    const bool requested_valid=output && iss_native_plan({output,percent,int(edges),s.iss_native_ui_16_9.load()},&requested);
+    if(requested_valid)
+        ImGui::Text("Selected: %u x %u scene, %u lighting entries",requested.width,requested.height,requested.light_entries);
     else if(output)ImGui::TextWrapped("This scale exceeds the supported 4K pixel budget. Choose a smaller scale; this request will be refused at startup.");
     ImGui::Separator();
     ImGui::TextWrapped("%s",runtime_native_reason());
@@ -782,10 +853,35 @@ void NativeRenderingTab() {
     if(runtime_native_status()==1){
         const auto* p=runtime_native_plan();
         ImGui::Text("Active scene: %u x %u (%d%%)",p->width,p->height,p->percent);
+        if(live_native && requested_valid && (p->width!=requested.width || p->height!=requested.height)){
+            const int phase=runtime_native_live_rebuild_state();
+            ImGui::TextColored(ImVec4(1.0f,0.75f,0.25f,1.0f),"%s",
+                phase==1||phase==2 ? "Selected size is waiting for its live rebuild." :
+                "Selected size is NOT active. Saved for next launch; restart required or choose a supported size.");
+        }
     }
+    uint32_t capacity_w{},capacity_h{},capacity_lights{};
+    if(live_native && runtime_native_live_capacity(&capacity_w,&capacity_h,&capacity_lights))
+        ImGui::TextWrapped("Startup allocation: %u x %u, %u lighting entries. Exceeding either dimension or the lighting budget requires restarting.",capacity_w,capacity_h,capacity_lights);
     ImGui::Text("Presented game image: %d x %d; window: %d x %d",s.image_width.load(),s.image_height.load(),s.window_width.load(),s.window_height.load());
     ImGui::TextWrapped("Use a matching display resolution and Borderless for native output. Disable external resolution patches. Startup movies and some post-processing still need visual validation.");
     if(ImGui::BeginTable("native_display",2)){DisplayModeRow();ImGui::EndTable();}
+}
+#endif
+#ifdef TLG_RENDERER_V2
+void PowerWheel(){
+    int open,choice;runtime_power_wheel_visual_status(&open,&choice);
+    IssPowerWheelStatus status{};runtime_power_wheel_status(&status);
+    if(!open||!status.ready||!TlgSettings::Get().iss_power_switch_enabled)return;
+    const auto *v=ImGui::GetMainViewport();
+    const ImVec2 center(v->Pos.x+v->Size.x*0.5f,v->Pos.y+v->Size.y*0.5f);
+    auto *draw=ImGui::GetForegroundDrawList();
+    const float side=std::min(450.0f*base_scale,std::min(v->Size.x,v->Size.y)*0.65f);
+    if(choice>=0&&!(status.unlocked_mask&(1<<choice)))choice=-1;
+    TlgPowerArt::Draw(draw,center,side,choice,ImGui::GetIO().DeltaTime,ImGui::GetTime(),TlgSettings::Get().iss_power_glow);
+    const char *hint=choice<0?"Center: cancel":(status.unlocked_mask&(1<<choice))?"Release to switch":"Locked";
+    ImVec2 text=ImGui::CalcTextSize(hint);
+    draw->AddText(ImVec2(center.x-text.x/2,center.y+side*0.51f),IM_COL32_WHITE,hint);
 }
 #endif
 void Menu() {
@@ -817,7 +913,7 @@ void Menu() {
     }
     footer_help = nullptr;
 #ifdef TLG_RENDERER_V2
-    constexpr int TabCount = 6;
+    constexpr int TabCount = 7;
 #else
     constexpr int TabCount = 4;
 #endif
@@ -836,7 +932,7 @@ void Menu() {
         static const char* const tabs[TabCount] = {"Overlay", TL("Image", "Imagem"), TL("Performance", "Desempenho"),
                                                    TL("Controls", "Controle")
 #ifdef TLG_RENDERER_V2
-                                                   ,"Karma", "Native rendering"
+                                                   ,"Karma", "Native rendering", "Trophies"
 #endif
                                                    };
         for (int tab = 0; tab < TabCount; ++tab) {
@@ -856,6 +952,7 @@ void Menu() {
 #ifdef TLG_RENDERER_V2
                 case 4: TlgKarmaMenu(); break;
                 case 5: NativeRenderingTab(); break;
+                case 6: TlgTrophiesMenu(); break;
 #endif
                 default: OverlayTab(); break;
                 }
@@ -2105,7 +2202,13 @@ void SetMousePad(bool active, float x, float y, bool touching, bool clicking) {
 bool Visible() {
     const auto& s = TlgSettings::Get();
     const auto now = std::chrono::steady_clock::now();
-    return initialized && (loading || background_total || menu_open || text_entry_active || choice_active ||
+    bool power_wheel_visible=false;
+#ifdef TLG_RENDERER_V2
+    int wheel_open,wheel_choice;
+    runtime_power_wheel_visual_status(&wheel_open,&wheel_choice);
+    power_wheel_visible=wheel_open&&s.iss_power_switch_enabled;
+#endif
+    return initialized && (power_wheel_visible || loading || background_total || menu_open || text_entry_active || choice_active ||
                            message_active || guide_active || progress_on || now < progress_until || now < toast_until ||
                            NoticeActive() || mouse_pad_on ||
                            choice_retiring || s.show_fps ||
@@ -2256,6 +2359,11 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
 
     UpdateChoiceTextures();
+#ifdef TLG_RENDERER_V2
+    int power_open,power_choice;runtime_power_wheel_visual_status(&power_open,&power_choice);
+    if(power_open)TlgPowerArt::UpdateTexture();
+    if(menu_open && TlgSettings::Get().menu_tab==6)TlgTrophiesUpdateTextures();
+#endif
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
     if (loading) {
@@ -2269,6 +2377,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (!loading && !menu_open) {
         HealthDisplay();
+#ifdef TLG_RENDERER_V2
+        PowerWheel();
+#endif
     }
     if (background_total && !loading && !menu_open) {
         BackgroundLoading();

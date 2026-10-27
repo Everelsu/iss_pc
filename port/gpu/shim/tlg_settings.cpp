@@ -163,6 +163,15 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.iss_native_percent = std::clamp(i,25,200);
     } else if (key == "iss_native_hud_edges") {
         v.iss_native_hud_edges = i != 0;
+    } else if (key == "iss_power_glow") {
+        v.iss_power_glow=std::clamp(f,0.5f,3.0f);
+    } else if (key == "iss_power_instant") {
+        v.iss_power_instant=i!=0;
+    } else if (key == "iss_power_switch_enabled") {
+        v.iss_power_switch_enabled=i!=0;
+    } else if (key == "iss_power_key_smoke" || key == "iss_power_key_neon" || key == "iss_power_key_video" || key == "iss_power_key_concrete") {
+        int index=key=="iss_power_key_smoke"?0:key=="iss_power_key_neon"?1:key=="iss_power_key_video"?2:3;
+        v.iss_power_keys[index]=std::clamp(i,0,511);
     } else if (key == "iss_native_ui_16_9") {
         v.iss_native_ui_16_9 = std::clamp(i,0,2);
     } else if (key == "render_resolution") {
@@ -360,6 +369,10 @@ void Save() {
     std::fprintf(file, "iss_native_output=%d\niss_native_percent=%d\niss_native_hud_edges=%d\n",
                  v.iss_native_output.load(),v.iss_native_percent.load(),int(v.iss_native_hud_edges.load()));
     std::fprintf(file, "iss_native_ui_16_9=%d\n",int(v.iss_native_ui_16_9.load()));
+    std::fprintf(file,"iss_power_switch_enabled=%d\niss_power_key_smoke=%d\niss_power_key_neon=%d\niss_power_key_video=%d\niss_power_key_concrete=%d\n",
+        int(v.iss_power_switch_enabled.load()),v.iss_power_keys[0].load(),v.iss_power_keys[1].load(),v.iss_power_keys[2].load(),v.iss_power_keys[3].load());
+    std::fprintf(file,"iss_power_instant=%d\n",int(v.iss_power_instant.load()));
+    std::fprintf(file,"iss_power_glow=%.2f\n",v.iss_power_glow.load());
     std::fprintf(file, "red_orb_multiplier=%.3f\n", v.red_orb_multiplier.load());
     std::fprintf(file, "damage_dealt=%.3f\n", v.damage_dealt.load());
     std::fprintf(file, "damage_taken=%.3f\n", v.damage_taken.load());
@@ -436,3 +449,8 @@ const char* UpscalerName(int upscaler) {
 }
 
 } // namespace TlgSettings
+extern "C" void tlggpu_power_wheel_settings(int *enabled,int keys[4],int *instant){
+    auto &s=TlgSettings::Get();*enabled=int(s.iss_power_switch_enabled.load());
+    *instant=int(s.iss_power_instant.load());
+    for(int i=0;i<4;i++)keys[i]=s.iss_power_keys[i].load();
+}

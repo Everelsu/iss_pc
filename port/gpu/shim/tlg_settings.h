@@ -39,7 +39,7 @@ inline constexpr int kExtraPrefs = sizeof(kExtraKeys) / sizeof(kExtraKeys[0]);
 struct Values {
     // Native scene dimensions, applied once at startup; independent of output upscaling.
     std::atomic<int> iss_native_output{0}, iss_native_percent{100};
-    std::atomic<bool> iss_native_hud_edges{true};
+    std::atomic<bool> iss_native_hud_edges{false};
     /// Off / no object motion, as the launcher's ISS_UPSCALER=off and ISS_OBJECT_MOTION=0 set
     /// them: a direct run (run.sh, the probe) must not pay the native-AA FSR 3 render and the
     /// ~10% object motion cost (jitter only matters while an upscaler runs).
@@ -160,7 +160,11 @@ struct Values {
     /// Keyboard and mouse button remap (TLG_KEY_MAP syntax); written by Load only, read once.
     std::string key_map;
     // Append experimental settings so established renderer field offsets stay stable.
-    std::atomic<int> iss_native_ui_16_9{0};
+    std::atomic<int> iss_native_ui_16_9{1};
+    std::atomic<bool> iss_power_switch_enabled{true};
+    std::atomic<int> iss_power_keys[4]{62,63,64,65}; // SDL F5/F6/F7/F8
+    std::atomic<bool> iss_power_instant{true};
+    std::atomic<float> iss_power_glow{2.04f};
 };
 
 Values& Get();

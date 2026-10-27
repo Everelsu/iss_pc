@@ -21,6 +21,7 @@ static void FlushInstructionCache(void*,void*,size_t){}
 #include "../src/iss_karma_signatures.h"
 
 static IssKarmaSnapshot disk_snapshot{};
+extern "C" int tlggpu_overlay_captures_input(void){return 0;}
 extern "C" int iss_karma_binding_poll(float,int,int,int){return 1;}
 extern "C" int iss_karma_profile_capture_pending(){return 0;}
 extern "C" int iss_karma_profile_capture(const IssKarmaSnapshot*,int){return 0;}

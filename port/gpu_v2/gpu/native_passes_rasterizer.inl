@@ -1380,6 +1380,10 @@ constexpr const char* reject_names[13] = {"context", "user_data", "inherited", "
                                           "env", "inherited_state", "dynamic", "assumed"};
 
 static void Report() {
+    static const bool reports=[] {
+        const char* p=std::getenv("ISS_NATIVE_PASSES_REPORT");return p&&std::strcmp(p,"1")==0;
+    }();
+    if(!reports)return; // Optional diagnostic-only comparison; draw decisions are unchanged.
     std::fprintf(stderr,
                  "NATIVE_PASSES_GUARDS template_gate=%d learn_gated=%llu auto_draws=%llu depth_mix=%llu "
                  "(guard %s) classes=%u left[opaque=%llu depth=%llu blend=%llu]\n",

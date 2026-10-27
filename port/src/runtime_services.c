@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "gpu/tlggpu.h"
+#include "iss_trophies.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -532,7 +533,28 @@ static ABI int32_t ime_result(uint32_t *result) {
 }
 static ABI int32_t ime_term(void) { memset(&ime,0,sizeof(ime)); return 0; }
 
-/* ---- Trophies: accepted locally, recorded in the log ---- */
+/* ---- Trophies: optional persistent local backend; classic log-only fallback ---- */
+static const IssTrophyBackend *trophy_backend;
+static int trophy_save_mode_ready;
+static uintptr_t trophy_progress_object;
+typedef void (ABI *TrophyProgressReset)(void *object);
+static TrophyProgressReset trophy_original_reset;
+void runtime_trophy_attach_reset(uintptr_t object,uintptr_t original) { trophy_progress_object=object;trophy_original_reset=(TrophyProgressReset)original; }
+ABI void runtime_trophy_progress_reset(void *object) {
+    if((uintptr_t)object==trophy_progress_object&&trophy_backend&&trophy_backend->progress_reset)trophy_backend->progress_reset();
+    trophy_original_reset(object);
+}
+void runtime_trophy_set_save_mode_ready(int ready) { trophy_save_mode_ready=ready; }
+int runtime_trophy_save_mode_ready(void) { return trophy_save_mode_ready; }
+ABI uint8_t runtime_trophy_query(void *object,int32_t id) {
+    (void)object;uint32_t flags[4]={0},total=0;
+    if(!trophy_save_mode_ready||!trophy_backend||id<0||id>=48||trophy_backend->state(flags,&total)!=0)return 0;
+    return (uint8_t)((flags[id/32]>>(id%32))&1);
+}
+void runtime_trophy_set_backend(const IssTrophyBackend *backend) { trophy_backend=backend; }
+void runtime_trophy_save_open(int fd,int writing,uint64_t length) { if(trophy_backend&&trophy_backend->save_open)trophy_backend->save_open(fd,writing,length); }
+void runtime_trophy_save_part(int fd,const void *bytes,int64_t offset,int64_t size,int writing) { if(trophy_backend&&trophy_backend->save_part)trophy_backend->save_part(fd,bytes,offset,size,writing); }
+void runtime_trophy_save_close(int fd) { if(trophy_backend&&trophy_backend->save_close)trophy_backend->save_close(fd); }
 static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint64_t options) {
     (void)user; (void)label; (void)options;
     if (!ctx) return TROPHY_INVALID;
@@ -541,7 +563,8 @@ static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint6
 static ABI int32_t trophy_handle(int32_t *handle) { if (!handle) return TROPHY_INVALID; *handle=new_id(); return 0; }
 static ABI int32_t trophy_register(int32_t ctx,int32_t handle,uint64_t options) { (void)ctx; (void)handle; (void)options; return 0; }
 static ABI int32_t trophy_unlock(int32_t ctx,int32_t handle,int32_t id,int32_t *platinum) {
-    (void)ctx; (void)handle;
+    if (ctx<=0 || handle<=0) return TROPHY_INVALID;
+    if (trophy_backend) return trophy_backend->unlock(id,platinum);
     printf("Runtime: trophy %d unlocked\n",id);
     if (platinum) *platinum=-1;
     return 0;
@@ -555,10 +578,11 @@ static ABI int32_t trophy_game_info(int32_t ctx,int32_t handle,void *details,voi
 static ABI int32_t trophy_info(int32_t ctx,int32_t handle,int32_t id,void *details,void *data) {
     (void)id; return trophy_game_info(ctx,handle,details,data);
 }
-/* Nothing is unlocked on this console: an empty 128-trophy flag set. */
+/* Return persistent local flags when a backend is present. */
 static ABI int32_t trophy_unlock_state(int32_t ctx,int32_t handle,uint32_t *flags,uint32_t *count) {
     if (!flags || !count) return TROPHY_INVALID;
     if (ctx<=0 || handle<=0) return TROPHY_INVALID;
+    if (trophy_backend) return trophy_backend->state(flags,count);
     memset(flags,0,16); *count=0;
     return 0;
 }

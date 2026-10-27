@@ -1,0 +1,144 @@
+name: Normal Sunny Linux tester build
+on:
+  push:
+    branches: [build/normal-linux-20261027]
+    paths: ['port/**', '.github/workflows/normal-linux-20261027.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: port
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      PKG_CONFIG_PATH: /opt/tlgdeps/lib/pkgconfig:/opt/tlgdeps/lib64/pkgconfig:/opt/tlgdeps/lib/x86_64-linux-gnu/pkgconfig
+      CMAKE_PREFIX_PATH: /opt/tlgdeps
+      LD_LIBRARY_PATH: /opt/tlgdeps/lib:/opt/tlgdeps/lib64:/opt/tlgdeps/lib/x86_64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Release note tests
+        working-directory: .
+        run: python3 .github/scripts/test_release_notes.py
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gcc-14 g++-14 cmake ninja-build pkg-config nasm \
+            curl git python3-venv python3-tk libvulkan-dev glslang-tools libboost-dev \
+            libxxhash-dev zlib1g-dev libx11-dev libxcb1-dev libxext-dev libxrandr-dev libxcursor-dev \
+            libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            libdecor-0-dev libegl-dev libgl-dev libdrm-dev libgbm-dev libpulse-dev libasound2-dev \
+            libpipewire-0.3-dev libudev-dev libdbus-1-dev libusb-1.0-0-dev libfreetype-dev \
+            clang libssl-dev
+      - name: Cache built libraries
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: /opt/tlgdeps
+          key: tlgdeps-ubuntu2404-${{ hashFiles('port/packaging/linux/build_deps.sh') }}
+      - name: Build libraries (SDL3, Zydis, fmt, FFmpeg)
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p /opt/tlgdeps && sudo chown "$USER" /opt/tlgdeps
+          bash packaging/linux/build_deps.sh
+      - name: Build
+        id: build
+        run: |
+          # Keep compilation progress visible while build.sh captures Ninja's full log.
+          (while sleep 30; do
+            echo "Build running: $(date -u +%H:%M:%S) UTC"
+            tail -n 2 out/gpu-build.log 2>/dev/null || true
+          done) &
+          progress_pid=$!
+          trap 'kill "$progress_pid" 2>/dev/null || true' EXIT
+          # TLG_RENDERER_V2=1: renderer v2 too (port/gpu_v2, out/tlg-probe-v2), shipped in the package.
+          TLG_RENDERER_V2=1 TLG_LTO=ON TLG_PGO=off bash build.sh
+      # The unit tests need no GPU, display or game file. Each test step runs even when an earlier
+      # one failed (all failures show in one run); any failure fails the job before Package.
+      - name: C tests
+        # build.sh's test list, reusing out/ from Build (same TLG_LTO/TLG_PGO: nothing is rebuilt).
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: TLG_LTO=ON TLG_PGO=off bash build.sh --test-only
+      - name: Python tests
+        # The venv is the one packaging/linux/package.sh reuses: the pinned PySide6 and iced-x86.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          source packaging/port.env
+          python3 -m venv out/pyenv
+          out/pyenv/bin/python -m pip install -q --disable-pip-version-check iced-x86==1.21.0 "$PORT_QT_PACKAGE"
+          QT_QPA_PLATFORM=offscreen out/pyenv/bin/python -m unittest discover -s tests
+      - name: GPU library tests
+        # Every *-test executable CMake defines in out/gpu for this platform (the Windows-only ones
+        # are not defined here); a test that needs a Vulkan driver prints SKIP without one. The link
+        # rule keeps out phony aliases of third-party targets. Each test runs in an empty directory.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          mapfile -t tests < <(ninja -C out/gpu -t targets all |
+            grep -E '^[^/:]+-test: (C|CXX)_EXECUTABLE_LINKER' | cut -d: -f1 | sort)
+          (( ${#tests[@]} )) || { echo 'no GPU test targets in out/gpu'; exit 1; }
+          echo "GPU tests: ${tests[*]}"
+          ninja -C out/gpu "${tests[@]}"
+          gpu=$PWD/out/gpu
+          failed=()
+          for test in "${tests[@]}"; do
+            echo "::group::$test"
+            (cd "$(mktemp -d)" && timeout 600 "$gpu/$test") || failed+=("$test")
+            echo "::endgroup::"
+          done
+          (( ${#failed[@]} == 0 )) || { echo "::error::GPU tests failed: ${failed[*]}"; exit 1; }
+      - name: Compatibility regression checks
+        run: |
+          cmake --build out/gpu_v2 --target test_mouse_aim test_hud_trace test_native_resolution test_karma_regression test_karma_quarantine test_karma_save_versions test_karma_save_session test_karma_profiles test_exclusive_presentation test_graphics_settings -j2
+          ctest --test-dir out/gpu_v2 --output-on-failure
+      - name: Added feature tests
+        run: |
+          cmake --build out/gpu_v2 -j2
+          ctest --test-dir out/gpu_v2 --output-on-failure
+      - name: Package
+        run: bash packaging/linux/package.sh
+      - name: Smoke test (frozen Qt launcher)
+        # Opens the packaged launcher offscreen and renders a frame: a package whose launcher cannot
+        # start (missing Qt plugin, QML, font, translation) must not become a release.
+        run: |
+          set -euo pipefail
+          smoke=$(mktemp -d)
+          tar -C "$smoke" -xzf dist/infamous-linux-x86_64.tar.gz
+          out=$(QT_QPA_PLATFORM=offscreen timeout 120 "$smoke/infamous-linux-x86_64/inFAMOUS Second Son" --selftest 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          grep -qx 'selftest ok' <<<"$out"
+      - name: ZIP for Linux testers
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile, hashlib, json
+          root=Path('out/stage/infamous-linux-x86_64')
+          info={'source_commit':__import__('os').environ['GITHUB_SHA'],
+              'normal_windows_sha256':'fbc02b41d592f39ac084e1e94dbed3a1b9e02e644918c3a4b701c4772a1bba7f',
+              'linux_gameplay_tested':False,'performance_experiments_included':False,
+              'game_files_included':False,'personal_data_included':False}
+          (root/'SUNNY-LINUX-BUILD.json').write_text(json.dumps(info,indent=2))
+          (root/'START-HERE-LINUX.txt').write_text('Sunny normal-build Linux test package.\nExtract into a NEW folder. Run chmod +x "inFAMOUS Second Son" "inFAMOUS Second Son (classic)" out/tlg-probe out/tlg-probe-v2, then open "inFAMOUS Second Son" and select your own CUSA00223 update1.07 game dump. Renderer v2 includes direct mouse, camera, Karma/trophies, wheel, native resolution/4K/32:9 changes from the normal Windows source snapshot. Linux gameplay is untested; Windows exclusive-fullscreen behavior does not transfer directly. Ubuntu24.04/glibc2.39 or newer, Vulkan driver required. No saves, personal mod ledgers, game files or experimental performance changes included. Back up your own saves AND matching mod ledgers before testing.\n')
+          archive=Path('dist/infamous-linux-x86_64-sunny-normal-20261027.zip')
+          with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file():
+                      assert p.resolve().is_relative_to(root.resolve()),p
+                      z.write(p,p.relative_to(root.parent))
+          with zipfile.ZipFile(archive) as z:assert z.testzip() is None
+          archive.with_suffix('.zip.sha256').write_text(hashlib.sha256(archive.read_bytes()).hexdigest()+'  '+archive.name+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sunny-normal-linux-20261027
+          path: |
+            port/dist/infamous-linux-x86_64-sunny-normal-20261027.zip
+            port/dist/infamous-linux-x86_64-sunny-normal-20261027.zip.sha256
+          if-no-files-found: error
+          retention-days: 7

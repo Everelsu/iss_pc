@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "tlg_karma_save_session.h"
+#include "../../src/iss_trophies.h"
 extern "C" const char* runtime_file_user_dir(void);
 extern "C" void runtime_karma_load_begin(void);
 namespace {
@@ -7,11 +8,12 @@ std::mutex mutex;
 KarmaSaveSession::Session session;
 }
 extern "C" void iss_karma_save_open(int fd,int writing,uint64_t length){
+ runtime_trophy_save_open(fd,writing,length);
  if(!writing)runtime_karma_load_begin();
  std::lock_guard guard(mutex);session.Configure(std::filesystem::u8path(runtime_file_user_dir()));session.Open(fd,writing!=0,size_t(length));
 }
-extern "C" void iss_karma_save_part(int fd,const void* bytes,int64_t offset,int64_t size,int writing){std::lock_guard guard(mutex);session.Part(fd,bytes,offset,size,writing!=0);}
-extern "C" void iss_karma_save_close(int fd){std::lock_guard guard(mutex);session.Close(fd);}
+extern "C" void iss_karma_save_part(int fd,const void* bytes,int64_t offset,int64_t size,int writing){runtime_trophy_save_part(fd,bytes,offset,size,writing);std::lock_guard guard(mutex);session.Part(fd,bytes,offset,size,writing!=0);}
+extern "C" void iss_karma_save_close(int fd){runtime_trophy_save_close(fd);std::lock_guard guard(mutex);session.Close(fd);}
 extern "C" int iss_karma_binding_poll(float score,int side,int rank,int shards){std::lock_guard guard(mutex);return session.Poll({score,side,rank,shards});}
 extern "C" int iss_karma_binding_ready(void){std::lock_guard guard(mutex);return session.Ready();}
 extern "C" const char* iss_karma_binding_problem(void){static thread_local std::string copy;std::lock_guard guard(mutex);copy=session.Problem();return copy.c_str();}

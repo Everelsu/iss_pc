@@ -14,8 +14,15 @@ static void fixture(std::vector<unsigned char>& image){
     for(const auto& s:iss_native_sites)memcpy(image.data()+s.offset,s.before,s.length);
     memcpy(image.data()+0x58030c,iss_native_projection,sizeof(iss_native_projection));
     memcpy(image.data()+0x5802e6,iss_native_aspect_width,sizeof(iss_native_aspect_width));
+    memcpy(image.data()+0x171310,iss_exposure_allocator,sizeof(iss_exposure_allocator));
+    for(const auto& s:iss_exposure_sites)memcpy(image.data()+s.offset,s.before,5);
 }
 int main(int argc,char** argv){
+    IssNativeConfig fresh;
+    assert(iss_native_config(nullptr,&fresh));
+    assert(fresh.output==0 && fresh.percent==100 && fresh.ui_16_9==1 && fresh.hud_edges==0);
+    FILE* legacy=tmpfile();assert(legacy);fputs("iss_native_ui_16_9=0\niss_native_hud_edges=1\n",legacy);rewind(legacy);
+    assert(iss_native_config(legacy,&fresh)&&fresh.ui_16_9==0&&fresh.hud_edges==1);fclose(legacy);
     IssNativePlan p;
     for(int output=1;output<ISS_NATIVE_PRESETS;output++){
         assert(iss_native_plan({output,100,1},&p));
@@ -70,7 +77,8 @@ int main(int argc,char** argv){
     assert(read32(image.data()+0x16be07)==3735552 && read32(image.data()+0x16be1f)==3735552);
     // Check every byte outside the patch plan, including the camera/karma sites.
     auto expected=original;IssNativeSite changes[ISS_NATIVE_SITE_COUNT];assert(iss_native_plan({5,100,1},&p));iss_native_changes(&p,changes);
-    for(const auto& s:changes)memcpy(expected.data()+s.offset,s.after,s.length);assert(image==expected);
+    for(const auto& s:changes)memcpy(expected.data()+s.offset,s.after,s.length);
+    iss_native_exposure_write(expected.data(),iss_native_exposure_entries(p.width,p.height));assert(image==expected);
     runtime_native_publish(-1,"Refused",nullptr);assert(runtime_native_status()==-1 && runtime_native_safe_area()==1.0f);
     p.hud_edges=0;runtime_native_publish(1,"Active",&p);assert(runtime_native_safe_area()==0.5f);
     p.hud_edges=1;runtime_native_publish(1,"Active",&p);assert(runtime_native_safe_area()==1.0f);
