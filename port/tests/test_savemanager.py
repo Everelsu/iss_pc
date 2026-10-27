@@ -199,8 +199,15 @@ class BackupAndDeleteTests(Base):
         """tasklist blocked or intercepted (antivirus, sandboxing): stdout comes back None rather
         than raising, and the caller must not crash on it."""
         with mock.patch.object(sm.os, 'name', 'nt'), \
+             mock.patch.object(sm, '_toolhelp_names', return_value=None), \
              mock.patch.object(sm.subprocess, 'run', return_value=mock.Mock(stdout=None)):
             self.assertEqual([], sm._process_names())
+
+    @unittest.skipUnless(os.name == 'nt', 'Toolhelp is Windows')
+    def test_toolhelp_lists_this_process_without_starting_one(self):
+        with mock.patch.object(sm.subprocess, 'run', side_effect=AssertionError('no process may be started')):
+            names = [n.lower() for n in sm._toolhelp_names()]
+        self.assertIn(os.path.basename(sys.executable).lower(), names)
 
 
 class RestoreTests(Base):

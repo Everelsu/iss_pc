@@ -7,7 +7,7 @@ Every name here was checked in the game's code:
                                  "<ps4 button>=<key>[|<key>...]", comma separated, "none"), the mouse
                                  sources, load_pad_mode (TLG_MOUSE_PAD, _MODE, _SENS, _DRAG, _KEY)
   - port/gpu/shim/tlg_settings.cpp  the tlg.ini keys mouse_enabled, mouse_sensitivity, mouse_invert_y,
-                                 mouse_smoothing, mouse_accel, mouse_deadzone (and their ranges)
+                                 native direct-aim sensitivity range
 The mouse code is on the feat/mouse-camera branch; with a game build that does not have it the keys
 are written to tlg.ini and the variables are exported, and the game ignores them.
 The game reads ISS_* like TLG_* (the probe copies one to the other), so the launcher exports ISS_*.
@@ -108,9 +108,6 @@ MOUSE_KEYS = (
     ('mouse_enabled', 'bool', '1', None, None),
     ('mouse_sensitivity', 'float', '1.00', (0.05, 10.0), (0.1, 5.0)),
     ('mouse_invert_y', 'bool', '0', None, None),
-    ('mouse_smoothing', 'float', '0.50', (0.0, 0.95), (0.0, 0.9)),
-    ('mouse_accel', 'float', '0.00', (0.0, 2.0), (0.0, 2.0)),
-    ('mouse_deadzone', 'float', '0.10', (0.0, 0.5), (0.0, 0.5)),
 )
 MOUSE_SPEC = {row[0]: row for row in MOUSE_KEYS}
 

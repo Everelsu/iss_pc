@@ -7,6 +7,7 @@
 #include <iterator>
 #include <vector>
 #include <algorithm>
+#include <string>
 static uint32_t read32(const unsigned char* p){uint32_t x;memcpy(&x,p,4);return x;}
 static uint64_t read64(const unsigned char* p){uint64_t x;memcpy(&x,p,8);return x;}
 static void fixture(std::vector<unsigned char>& image){
@@ -14,8 +15,40 @@ static void fixture(std::vector<unsigned char>& image){
     for(const auto& s:iss_native_sites)memcpy(image.data()+s.offset,s.before,s.length);
     memcpy(image.data()+0x58030c,iss_native_projection,sizeof(iss_native_projection));
     memcpy(image.data()+0x5802e6,iss_native_aspect_width,sizeof(iss_native_aspect_width));
+    memcpy(image.data()+0x171310,iss_exposure_allocator,sizeof(iss_exposure_allocator));
+    for(const auto& s:iss_exposure_sites)memcpy(image.data()+s.offset,s.before,5);
+}
+// tests/native_resolution_cases.txt is shared with test_native_resolution_launcher.py (the launchers'
+// copy of this arithmetic): both must give the same answers.
+static unsigned shared_cases(){
+    std::string path=__FILE__;path=path.substr(0,path.find_last_of("/\\")+1)+"native_resolution_cases.txt";
+    std::ifstream in(path);assert(in);unsigned count=0;std::string line;
+    while(std::getline(in,line)){
+        if(line.empty()||line[0]=='#')continue;
+        char kind[16];int a=0,b=0,c=0,d=0,e=0,f=0,g=0;
+        if(sscanf(line.c_str(),"plan %d %d -> %d %d",&a,&b,&c,&d)==4){
+            IssNativePlan p;assert(iss_native_plan({a,b,1,0},&p)&&int(p.width)==c&&int(p.height)==d);
+        }else if(sscanf(line.c_str(),"plan %d %d -> %15s",&a,&b,kind)==3){
+            IssNativePlan p;assert(!strcmp(kind,"refused")&&!iss_native_plan({a,b,1,0},&p));
+        }else if(sscanf(line.c_str(),"pick %d %d -> %d %d %d %d %d",&a,&b,&c,&d,&e,&f,&g)==7){
+            IssNativePick r;assert(iss_native_pick(a,uint32_t(b),&r)==c);
+            assert(r.percent==d&&int(r.width)==e&&int(r.height)==f&&r.error==g);
+        }else if(sscanf(line.c_str(),"step %d %d -> %d",&a,&b,&c)==3){
+            assert(iss_native_step_for_percent(a,b)==c);
+        }else if(sscanf(line.c_str(),"retarget %d %d %d -> %d",&a,&b,&c,&d)==4){
+            assert(iss_native_retarget(a,b,c)==d);
+        }else assert(!"unknown line in native_resolution_cases.txt");
+        count++;
+    }
+    return count;
 }
 int main(int argc,char** argv){
+    assert(shared_cases()>=60);
+    IssNativeConfig fresh;
+    assert(iss_native_config(nullptr,&fresh));
+    assert(fresh.output==0 && fresh.percent==100 && fresh.ui_16_9==1 && fresh.hud_edges==0);
+    FILE* legacy=tmpfile();assert(legacy);fputs("iss_native_ui_16_9=0\niss_native_hud_edges=1\n",legacy);rewind(legacy);
+    assert(iss_native_config(legacy,&fresh)&&fresh.ui_16_9==0&&fresh.hud_edges==1);fclose(legacy);
     IssNativePlan p;
     for(int output=1;output<ISS_NATIVE_PRESETS;output++){
         assert(iss_native_plan({output,100,1},&p));
@@ -43,6 +76,18 @@ int main(int argc,char** argv){
     FILE* f=tmpfile();assert(f);fputs("iss_native_output=5\niss_native_percent=100\niss_native_hud_edges=0\n",f);rewind(f);
     IssNativeConfig c;assert(iss_native_config(f,&c) && c.output==5 && c.percent==100 && c.hud_edges==0);fclose(f);
     f=tmpfile();assert(f);fputs("iss_native_output=3\niss_native_percent=100oops\n",f);rewind(f);assert(!iss_native_config(f,&c));fclose(f);
+    // Temporal modes: 1080p output at 1.5x, 1.7x, 2x and 3x is 720p, 636p, 540p and 360p of scene
+    f=tmpfile();assert(f);fputs("iss_native_output=1\niss_temporal_mode=3\n",f);rewind(f);
+    assert(iss_native_config(f,&c) && c.temporal_mode==3 && c.percent==100);fclose(f);
+    assert(iss_native_apply_temporal_mode(&c,3) && c.percent==50);
+    assert(iss_native_plan(c,&p) && p.width==960 && p.height==540);
+    const int mode_scene[4][3]={{1,67,724},{2,59,638},{3,50,540},{4,33,356}};
+    for(auto& m:mode_scene){c={1,100,1};assert(iss_native_apply_temporal_mode(&c,m[0]) && c.percent==m[1]);
+        assert(iss_native_plan(c,&p) && int(p.height)==m[2]);}
+    c={0,100,1};assert(!iss_native_apply_temporal_mode(&c,2) && c.percent==100);   // no native output
+    c={1,80,1};assert(!iss_native_apply_temporal_mode(&c,0) && c.percent==80);     // mode 0 leaves the percent
+    assert(!iss_native_apply_temporal_mode(&c,5));
+    f=tmpfile();assert(f);fputs("iss_temporal_mode=5\n",f);rewind(f);assert(!iss_native_config(f,&c));fclose(f);
     std::vector<unsigned char> image;fixture(image);const auto original=image;
     // Each instruction byte is independently corrupted. Even the last lighting
     // descriptor must refuse before a single dimension or HUD byte is changed.
@@ -70,7 +115,8 @@ int main(int argc,char** argv){
     assert(read32(image.data()+0x16be07)==3735552 && read32(image.data()+0x16be1f)==3735552);
     // Check every byte outside the patch plan, including the camera/karma sites.
     auto expected=original;IssNativeSite changes[ISS_NATIVE_SITE_COUNT];assert(iss_native_plan({5,100,1},&p));iss_native_changes(&p,changes);
-    for(const auto& s:changes)memcpy(expected.data()+s.offset,s.after,s.length);assert(image==expected);
+    for(const auto& s:changes)memcpy(expected.data()+s.offset,s.after,s.length);
+    iss_native_exposure_write(expected.data(),iss_native_exposure_entries(p.width,p.height));assert(image==expected);
     runtime_native_publish(-1,"Refused",nullptr);assert(runtime_native_status()==-1 && runtime_native_safe_area()==1.0f);
     p.hud_edges=0;runtime_native_publish(1,"Active",&p);assert(runtime_native_safe_area()==0.5f);
     p.hud_edges=1;runtime_native_publish(1,"Active",&p);assert(runtime_native_safe_area()==1.0f);

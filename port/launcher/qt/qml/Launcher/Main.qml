@@ -26,6 +26,11 @@ Rectangle {
             Item {
                 id: slot
                 readonly property bool on: root.current === index
+                // A page is built the first time it is shown and then kept (its scroll and state stay);
+                // building all ten at start made every state change reach ten pages' bindings.
+                property bool visited: false
+                onOnChanged: if (on) visited = true
+                Component.onCompleted: if (on) visited = true
                 width: stage.width; height: stage.height
                 opacity: on ? 1 : 0
                 visible: opacity > 0.01
@@ -34,6 +39,7 @@ Rectangle {
                 Behavior on y { enabled: root.animate; NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
                 Loader {
                     anchors.fill: parent
+                    active: slot.visited
                     sourceComponent: { var k = root.pages[index]
                         return k === "play" ? home : k === "graphics" ? graphics : k === "controls" ? controls
                              : k === "fixes" ? fixes : k === "saves" ? saves : k === "guides" ? guides

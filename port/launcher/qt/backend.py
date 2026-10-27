@@ -149,6 +149,7 @@ class Backend(QObject):
     profileChanged = Signal()
     gameLanguageChanged = Signal()
     gpuFound = Signal(object)
+    padFound = Signal(object)              # controller name or None (from the probing thread)
     lineReceived = Signal(str)
     jobsProgress = Signal(str, int, int)   # shader list: phase, done, total (from the play thread)
     cacheMeasured = Signal(object)         # bytes of the shader cache (from the measuring thread)
@@ -171,6 +172,7 @@ class Backend(QObject):
         self.fix_states = tlg_run.experimental_states(self.settings)
         self._gpu = 'checking'
         self._pad = None
+        self._pad_scanning = False
         self._chips, self._ready = [], False
         self._play_state = 'idle'
         self._log = []
@@ -185,6 +187,7 @@ class Backend(QObject):
         self.fixes = FixesModel(self)
         self.advanced = FixesModel(self, 'adv')
         self.gpuFound.connect(self._on_gpu)
+        self.padFound.connect(self._on_pad)
         self.lineReceived.connect(self._on_line)
         self.jobsProgress.connect(self._on_jobs_progress)
         self.precompiler = precompile.Precompiler()
@@ -231,13 +234,36 @@ class Backend(QObject):
         def work():
             self.gpuFound.emit(self.probe('gpu', logic.detect_gpu))
         threading.Thread(target=work, daemon=True).start()
+        self.rescan_pad()
+
+    def rescan_pad(self):
+        """Looks for a controller off the UI thread: `tlg-probe --gamepad` is a process that waits at
+        least 300 ms when none is connected, and every click used to wait for it."""
+        if 'pad' in self.probes or self._pad_scanning:
+            return
+        self._pad_scanning = True
+
+        def work():
+            try:
+                self.padFound.emit(logic.detect_pad())
+            finally:
+                self._pad_scanning = False
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_pad(self, pad):
+        if pad != self._pad:
+            self._pad = pad
+            self._compute_chips()
+            self.chipsChanged.emit()
+            self.stateChanged.emit()
 
     def _on_gpu(self, gpu):
         self._gpu = gpu
         self.refresh()
 
     def refresh(self):
-        self._pad = self.probe('pad', logic.detect_pad)
+        if 'pad' in self.probes:   # a test or the selftest injects the answer: no thread
+            self._pad = self.probes['pad']()
         self.measure_cache()
         self._compute_chips()
         self._news = self.probe('news', lambda: logic.news(self.t_, self.t_.pt()))
@@ -653,6 +679,67 @@ class Backend(QObject):
     @Slot(bool)
     def setVerboseLog(self, on):
         self.setFix(self._verbose_log_item().id, '1' if on else '0')
+
+    # -- upscaler (Home screen): one selector over fsr1 / iss_temporal / iss_temporal_backend ----------------
+    _UPSCALER_KEYS = ('fsr1', 'iss_temporal', 'iss_temporal_backend', 'iss_temporal_mode')
+
+    def _menu_item(self, key):
+        return next(i for i in backports_table.ITEMS if i.key == key)
+
+    def _menu_value(self, key):
+        return backports_table.effective(self._menu_item(key), self.fix_states)
+
+    def _upscaler_choice(self):
+        """0 off, 1 FSR 1, 2 FSR 3.1 temporal, 3 NVIDIA DLSS temporal."""
+        if self._menu_value('iss_temporal') == '1':
+            return 3 if self._menu_value('iss_temporal_backend') == '1' else 2
+        return 1 if self._menu_value('fsr1') == '1' else 0
+
+    @Property('QVariantList', notify=profileChanged)
+    def upscalerOptions(self):
+        names = (('Off', 'Desligado'), ('FSR 1 (spatial)', 'FSR 1 (espacial)'),
+                 ('FSR 3.1 (temporal)', 'FSR 3.1 (temporal)'), ('NVIDIA DLSS (temporal)', 'NVIDIA DLSS (temporal)'))
+        return [{'value': str(n), 'label': self.t_.pair(pair)} for n, pair in enumerate(names)]
+
+    @Property(int, notify=profileChanged)
+    def upscalerIndex(self):
+        return self._upscaler_choice()
+
+    @Slot(str)
+    def setUpscaler(self, value):
+        """Writes the three switches behind the selector; a temporal one also needs an output resolution."""
+        pick = int(value)
+        self.fix_states[self._menu_item('fsr1').id] = backports_table.normalize(self._menu_item('fsr1'), '1' if pick == 1 else '0')
+        self.fix_states[self._menu_item('iss_temporal').id] = backports_table.normalize(self._menu_item('iss_temporal'), '1' if pick >= 2 else '0')
+        if pick >= 2:
+            self.fix_states[self._menu_item('iss_temporal_backend').id] = backports_table.normalize(
+                self._menu_item('iss_temporal_backend'), '1' if pick == 3 else '0')
+            if self._menu_value('iss_temporal_mode') == '0':
+                self.fix_states[self._menu_item('iss_temporal_mode').id] = backports_table.normalize(
+                    self._menu_item('iss_temporal_mode'), '1')   # Quality, the usual choice
+        self._save_fixes()
+        for key in self._UPSCALER_KEYS:
+            self.fixes.refresh_item(self._menu_item(key).id)
+            self.advanced.refresh_item(self._menu_item(key).id)
+        self.refresh()
+
+    @Property(bool, notify=profileChanged)
+    def upscalerHasQuality(self):
+        return self._upscaler_choice() >= 2
+
+    @Property('QVariantList', notify=profileChanged)
+    def upscalerQualityOptions(self):
+        item = self._menu_item('iss_temporal_mode')
+        return [{'value': v, 'label': self.t_.pair((en, pt))} for v, en, pt in item.choices if v != '0']
+
+    @Property(int, notify=profileChanged)
+    def upscalerQualityIndex(self):
+        value = self._menu_value('iss_temporal_mode')
+        return max(0, int(value) - 1)
+
+    @Slot(str)
+    def setUpscalerQuality(self, value):
+        self.setFix(self._menu_item('iss_temporal_mode').id, value)
 
     # -- game language (voice and text; the interface language above is separate) ---------------
     @Property('QVariantList', notify=gameLanguageChanged)

@@ -19,8 +19,10 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backports_table  # noqa: E402
+import dlss_setup  # noqa: E402
 import infamous_run as tlg_run  # noqa: E402  (same API as the TLG core)
 import logtail  # noqa: E402
+import native_resolution  # noqa: E402
 import precompile  # noqa: E402
 import preset_share  # noqa: E402
 
@@ -153,6 +155,8 @@ TEXT = {
     'exp_close': ('Close', 'Fechar'),
 }
 TEXT.update(preset_share.TEXT)   # export / import of configuration files
+TEXT.update(dlss_setup.TEXT)   # NVIDIA DLSS files and download: one table for both launchers
+TEXT.update(native_resolution.TEXT)   # output and internal resolution: one table for both launchers
 TEXT.update(precompile.TEXT)   # shader list texts: one table for both launchers
 TEXT.update(tlg_run.TEXT)  # game folder problems (old libc.prx, other eboot), shared with the command line
 COFFEE_URL = 'https://buymeacoffee.com/hayatog'
@@ -305,6 +309,8 @@ class Launcher:
         self.show_game_language()
         self.combo(lang, 1, 'ui_language', UI_LANGUAGES,
                    lambda k: self.t('auto') if k == 'auto' else UI_LANGUAGE_NAMES[k], on_change=self.build)
+        self.build_native(middle)
+        self.build_dlss(middle)
         video = ttk.LabelFrame(middle, text=self.t('video'), padding=8)
         video.grid(sticky='ew')
         video.columnconfigure(1, weight=1)
@@ -419,6 +425,157 @@ class Launcher:
                 self.refresh_status()
         box.bind('<<ComboboxSelected>>', picked)
         return box
+
+    # -- output and internal resolution (tlg.ini: iss_native_output / iss_native_percent) --------
+    def build_native(self, parent):
+        """Top of the graphics options. The two boxes write the keys the game reads
+        (native_resolution.py is the shared arithmetic); only renderer v2 has the feature."""
+        box = ttk.LabelFrame(parent, text=self.t('nat_section'), padding=8)
+        box.grid(sticky='ew', pady=(0, 8))
+        box.columnconfigure(1, weight=1)
+        self.native_ini = tlg_run.user_dir() / 'tlg.ini'
+        ttk.Label(box, text=self.t('nat_output')).grid(row=0, column=0, sticky='w')
+        self.native_output_box = ttk.Combobox(box, state='readonly', width=28,
+                                              values=[label for _, label in native_resolution.output_options(self.t)])
+        self.native_output_box.grid(row=0, column=1, sticky='w', padx=6, pady=2)
+        self.native_output_box.bind('<<ComboboxSelected>>', self.native_output_picked)
+        ttk.Label(box, text=self.t('nat_internal')).grid(row=1, column=0, sticky='w')
+        self.native_internal_box = ttk.Combobox(box, state='readonly', width=40)
+        self.native_internal_box.grid(row=1, column=1, sticky='w', padx=6, pady=2)
+        self.native_internal_box.bind('<<ComboboxSelected>>', self.native_internal_picked)
+        self.native_summary = ttk.Label(box, wraplength=420, justify='left')
+        self.native_summary.grid(row=2, column=0, columnspan=2, sticky='w', pady=(4, 0))
+        self.show_native()
+
+    # -- NVIDIA DLSS (dlss_setup.py): status of the two DLLs, download of NVIDIA's ---------------
+    def build_dlss(self, parent):
+        box = ttk.LabelFrame(parent, text=self.t('dlss_section'), padding=8)
+        box.grid(sticky='ew', pady=(0, 8))
+        box.columnconfigure(0, weight=1)
+        ttk.Label(box, text=self.t('dlss_what'), wraplength=420, justify='left', foreground='#555').grid(sticky='w')
+        self.dlss_dll_label = ttk.Label(box, wraplength=420, justify='left')
+        self.dlss_dll_label.grid(sticky='w', pady=(4, 0))
+        self.dlss_bridge_label = ttk.Label(box, wraplength=420, justify='left')
+        self.dlss_bridge_label.grid(sticky='w')
+        self.dlss_note = ttk.Label(box, wraplength=420, justify='left')
+        self.dlss_note.grid(sticky='w', pady=(4, 0))
+        self.dlss_button = ttk.Button(box, text=self.t('dlss_download'), command=self.dlss_ask)
+        self.dlss_button.grid(sticky='w', pady=(4, 0))
+        self.dlss_cancel = threading.Event()
+        self.dlss_events = queue.Queue()
+        self.dlss_busy = False
+        self.dlss_checked = None
+        self.dlss_check()
+
+    def dlss_check(self):
+        """The signature check starts PowerShell: off the UI thread, the labels fill in when it ends."""
+        self.dlss_dll_label.configure(text=self.t('dlss_checking'))
+        self.dlss_bridge_label.configure(text='')
+        configured = str(tlg_run.read_ini(tlg_run.user_dir() / 'tlg.ini').get('dlss_dll_dir', ''))
+
+        def work():
+            state = dlss_setup.status(tlg_run.user_dir(), configured, tlg_run.V2_PROBE.parent)
+            self.dlss_events.put(('state', state))
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(150, self.dlss_pump)
+
+    def dlss_show(self, state):
+        self.dlss_checked = state
+        self.dlss_dll_label.configure(text=dlss_setup.dll_line(self.t, state['dll']))
+        self.dlss_bridge_label.configure(text=dlss_setup.bridge_line(self.t, state['bridge']))
+        if not self.dlss_busy:
+            self.dlss_note.configure(text=self.t('dlss_ready') if dlss_setup.usable(state) else '', foreground='#363')
+            self.dlss_button.configure(text=self.t('dlss_download_again' if state['dll'].ok else 'dlss_download'))
+
+    def dlss_ask(self):
+        if self.dlss_busy:
+            self.dlss_cancel.set()
+            return
+        if not messagebox.askyesno(self.t('dlss_section'), self.t('dlss_confirm', mb=dlss_setup.NOMINAL_MB,
+                                                                 url=dlss_setup.SOURCE_URL, repo=dlss_setup.REPO_URL)):
+            return
+        configured = str(tlg_run.read_ini(tlg_run.user_dir() / 'tlg.ini').get('dlss_dll_dir', ''))
+        target = Path(configured) if configured else dlss_setup.default_folder(tlg_run.user_dir())
+        self.dlss_busy = True
+        self.dlss_cancel.clear()
+        self.dlss_button.configure(text=self.t('dlss_cancel'))
+
+        def work():
+            try:
+                result = dlss_setup.download(target, progress=lambda done, total: self.dlss_events.put(('progress', (done, total))),
+                                             cancel=self.dlss_cancel)
+            except dlss_setup.DlssError as error:
+                result = error
+            except Exception as error:
+                result = dlss_setup.DlssError('network', error)
+            self.dlss_events.put(('done', result))
+        threading.Thread(target=work, daemon=True).start()
+        self.dlss_pump()
+
+    def dlss_pump(self):
+        mb = 1024 * 1024
+        pending = False
+        while True:
+            try:
+                kind, data = self.dlss_events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == 'state':
+                self.dlss_show(data)
+            elif kind == 'progress' and self.dlss_busy:
+                done, total = data
+                self.dlss_note.configure(foreground='#555', text=self.t('dlss_progress', done=done // mb, total=total // mb)
+                                         if total else self.t('dlss_progress_unknown', done=done // mb))
+            elif kind == 'done':
+                self.dlss_busy = False
+                if isinstance(data, dlss_setup.DlssError):
+                    self.dlss_note.configure(text=self.t('dlss_err_' + data.key, detail=data.detail),
+                                             foreground='#555' if data.key == 'cancelled' else '#a33')
+                    self.dlss_button.configure(text=self.t('dlss_download'))
+                else:
+                    version = '.'.join((data.version or '?').split('.')[:3])
+                    self.dlss_note.configure(text=self.t('dlss_done', version=version, path=str(data.path)), foreground='#363')
+                    self.dlss_check()
+        if self.dlss_busy or self.dlss_checked is None:
+            self.root.after(150, self.dlss_pump)
+
+    def native_state(self):
+        return native_resolution.read(tlg_run.read_ini(self.native_ini))
+
+    def show_native(self):
+        """Fills the boxes from tlg.ini; both are disabled outside renderer v2, with the reason below."""
+        output, percent = self.native_state()
+        v2 = tlg_run.renderer_v2(self.settings)
+        options = native_resolution.internal_options(self.t, output, percent)
+        self.native_internal_values = [(value, ok) for value, _, ok in options]
+        self.native_output_box.current(output)
+        self.native_internal_box.configure(values=[label for _, label, _ in options])
+        current = native_resolution.internal_value(output, percent)
+        self.native_internal_box.current(next(i for i, (v, _) in enumerate(self.native_internal_values) if v == current)
+                                         if output else 0)
+        self.native_output_box.configure(state='readonly' if v2 else 'disabled')
+        self.native_internal_box.configure(state='readonly' if v2 and output else 'disabled')
+        if not v2:
+            text, color = self.t('nat_needs_v2'), '#a33'
+        else:
+            text, tone = native_resolution.summary(self.t, output, percent)
+            if output:
+                text += ' ' + self.t('nat_restart')
+            color = {'info': '#555', 'warn': '#a60', 'bad': '#a33'}[tone]
+        self.native_summary.configure(text=text, foreground=color)
+
+    def native_output_picked(self, _=None):
+        output, percent = self.native_state()
+        new_output = self.native_output_box.current()
+        native_resolution.save(self.native_ini, new_output, native_resolution.retarget(output, percent, new_output))
+        self.show_native()
+
+    def native_internal_picked(self, _=None):
+        output, _ = self.native_state()
+        value, ok = self.native_internal_values[self.native_internal_box.current()]
+        if ok:
+            native_resolution.save(self.native_ini, output, native_resolution.pick(output, int(value))[1])
+        self.show_native()          # a choice the game would refuse snaps back to what is stored
 
     def game_language_name(self, key):
         return self.t('game_language_auto') if key == 'auto' else GAME_LANGUAGE_NAMES[key]
@@ -618,6 +775,7 @@ class Launcher:
         self.exp_states[item.id] = backports_table.normalize(item, value)
         self.exp_save()
         self.exp_refresh_status()
+        self.show_native()          # the renderer choice enables or disables the resolution boxes
 
     def exp_reset(self, which):
         if which == 'previous':
@@ -626,6 +784,7 @@ class Launcher:
             self.exp_states = backports_table.defaults(self.exp_states)
         self.exp_save()
         self.build_experimental()
+        self.show_native()
 
     def exp_port_version(self):
         try:
@@ -715,7 +874,7 @@ class Launcher:
             inner = self.scrolled(page)
             tab = None
             for item in backports_table.ITEMS:
-                if item.group != group:
+                if item.group != group or item.hidden:
                     continue
                 if item.tab and item.tab != tab:
                     tab = item.tab

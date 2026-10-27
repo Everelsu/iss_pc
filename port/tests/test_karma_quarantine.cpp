@@ -5,6 +5,10 @@
 static std::string root;
 extern "C" const char* runtime_file_user_dir(){return root.c_str();}
 extern "C" void runtime_karma_load_begin(){}
+// Optional trophy observer is absent in this Karma isolation unit test.
+extern "C" void runtime_trophy_save_open(int,int,uint64_t){}
+extern "C" void runtime_trophy_save_part(int,const void*,int64_t,int64_t,int){}
+extern "C" void runtime_trophy_save_close(int){}
 int main(){
  const auto dir=std::filesystem::temp_directory_path()/
   ("iss-karma-quarantine-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

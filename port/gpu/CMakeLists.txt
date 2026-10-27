@@ -193,6 +193,7 @@ else()
     set(TLGGPU_KIND SHARED)
 endif()
 add_library(tlggpu ${TLGGPU_KIND} ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES}
+    ../src/trophy_store.cpp
     shadps4/core/libraries/gnmdriver/gnmdriver.cpp
     shadps4/core/libraries/videoout/driver.cpp shadps4/core/libraries/videoout/video_out.cpp
     shadps4/core/libraries/kernel/equeue.cpp ${AVPLAYER}
@@ -208,6 +209,9 @@ target_sources(tlggpu PRIVATE third_party/imgui/imgui.cpp third_party/imgui/imgu
     third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp
     third_party/imgui/backends/imgui_impl_vulkan.cpp)
 target_include_directories(tlggpu PRIVATE third_party/imgui third_party/imgui/backends)
+target_include_directories(tlggpu PRIVATE ../gpu_v2/compat)
+set_property(SOURCE shim/tlg_power_art.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS "TLG_POWER_WHEEL_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/shim/assets/power-wheel.png\"")
 target_compile_definitions(tlggpu PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
     TLG_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf")
 set_source_files_properties(shim/tlg_overlay.cpp PROPERTIES
@@ -277,10 +281,6 @@ if (WIN32)
     target_compile_options(pad-map-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
     target_include_directories(pad-map-test PRIVATE .. ../src)
     target_link_libraries(pad-map-test PRIVATE PkgConfig::SDL3 bcrypt -pthread)
-    add_executable(mouse-stick-test EXCLUDE_FROM_ALL ../tests/test_mouse_stick.c)
-    set_target_properties(mouse-stick-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(mouse-stick-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(mouse-stick-test PRIVATE .. ../src)
     add_executable(mouse-shake-test EXCLUDE_FROM_ALL ../tests/test_mouse_shake.c)
     set_target_properties(mouse-shake-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
     target_compile_options(mouse-shake-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
@@ -528,3 +528,10 @@ target_link_libraries(fsr4-bench PRIVATE ffx-vulkan::fsr4-v07-vulkan ffx-vulkan:
 
 add_executable(cheat-hook-test EXCLUDE_FROM_ALL ../tests/test_cheat_hook.cpp)
 target_compile_options(cheat-hook-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+
+# Automatic quality governor, and the temporal upscaling hooks of the game side (the second one runs the
+# stubs on the host; the checks against the real eboot need ISS_TEST_EBOOT and are skipped without it).
+add_executable(quality-governor-test EXCLUDE_FROM_ALL ../tests/test_quality_governor.cpp)
+target_compile_options(quality-governor-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_executable(iss-temporal-hook-test EXCLUDE_FROM_ALL ../tests/test_iss_temporal_hook.cpp)
+target_compile_options(iss-temporal-hook-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)

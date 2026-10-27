@@ -355,7 +355,7 @@ void Rasterizer::RunDrawPipePacket(void* context,const u8* data,u32 size){
             self.DrawIndirectRecord(static_cast<const GraphicsPipeline*>(p.pipeline),p.indexed,p.ind[0],
                                     static_cast<u32>(p.ind[1]),static_cast<u32>(p.ind[2]),static_cast<u32>(p.ind[3]),p.ind[4]);
             done=true;
-        }else if(s.fast&&FastDrawEnabled()){
+        }else if(s.fast&&FastDrawEnabled()&&!(self.iss_temporal&&self.iss_temporal->UiActive())){
             self.pipe_pipeline=static_cast<const GraphicsPipeline*>(p.pipeline);
             self.pipe_num_changed_regs=p.num_changed;
             std::memcpy(self.pipe_changed_regs.data(),p.changed.data(),std::min<u32>(p.num_changed,32)*sizeof(u32));

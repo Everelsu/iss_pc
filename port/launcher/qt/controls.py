@@ -11,7 +11,7 @@ from .logic import backports_table, tlg_run
 from .rowsmodel import RowsModel
 
 # ids: 'c:' launcher setting, 'm:' tlg.ini mouse key, 'i:' other tlg.ini key (rumble), 'p:' touchpad-mode setting, item ids of the table.
-MOUSE_ROWS = ('mouse_sensitivity', 'mouse_invert_y', 'mouse_smoothing', 'mouse_accel', 'mouse_deadzone')
+MOUSE_ROWS = ('mouse_sensitivity', 'mouse_invert_y')
 PAD_KEY_LABELS = {'': 'ctl_key_default', 'Left Ctrl': 'ctl_key_lctrl', 'Mouse X1': 'ctl_key_x1',
                   'Mouse X2': 'ctl_key_x2', 'Right Ctrl|Mouse X1': 'ctl_key_rctrl_x1'}
 

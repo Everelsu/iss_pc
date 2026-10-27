@@ -322,12 +322,30 @@ def gpu_info(run=subprocess.run, env=None):
                       creationflags=flags).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    try:   # the heaps are only in the long output; without it VRAM stays unknown
-        full = run([exe], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=25, env=env,
-                   creationflags=flags).stdout
-    except (OSError, subprocess.SubprocessError):
-        full = ''
+    full, smi_gb = '', None
+    first = parse_vulkan_devices(summary, '')
+    if first and first[0].get('vendorID', '').lower() == '0x10de':
+        # NVIDIA: nvidia-smi answers in about 200 ms. The plain `vulkaninfo` can sit for a minute
+        # on some systems, so it is not even started when the card already told its memory.
+        try:
+            try:
+                from . import gfxlogic
+            except ImportError:   # imported as a plain module (tests, tools)
+                import gfxlogic
+            smi = run(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'],
+                      stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5, creationflags=flags).stdout
+            smi_gb = (gfxlogic.parse_nvidia_smi(smi) or 0) / 1024 or None
+        except (ImportError, OSError, subprocess.SubprocessError):
+            smi_gb = None
+    if smi_gb is None:
+        try:   # the heaps are only in the long output; without it VRAM stays unknown
+            full = run([exe], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=25, env=env,
+                       creationflags=flags).stdout
+        except (OSError, subprocess.SubprocessError):
+            full = ''
     devices = parse_vulkan_devices(summary, full)
+    if smi_gb is not None and devices:
+        devices[0]['vram_gb'] = smi_gb
     if not devices:
         return None
     best = devices[0]

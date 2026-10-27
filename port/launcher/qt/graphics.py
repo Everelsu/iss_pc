@@ -4,12 +4,15 @@ in-game Insert menu use: settings.json (display mode, VSync, FPS overlay, GPU ac
 switches, VRAM budget) and tlg.ini through the same table and the same save path as the Fixes
 screen (Backend.setFix -> infamous_run.save_experimental). It adds no key of its own."""
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 
 from . import gfxlogic, logic, report
 from .logic import backports_table, shader_cache, tlg_run
 from .rowsmodel import RowsModel
+import dlss_setup  # noqa: E402  (launcher/dlss_setup.py: the NVIDIA DLL, the bridge, the download)
+import native_resolution  # noqa: E402  (launcher/native_resolution.py: output + internal resolution)
 import preset_share  # noqa: E402  (launcher/preset_share.py; logic put the folder on sys.path)
 
 # (id, kind, live) of the options kept in settings.json. live: also in the Insert menu.
@@ -31,11 +34,12 @@ OVERLAY_IDS = tuple(i.id for i in backports_table.MENU if i.tab == 'Overlay')
 # Two-value choices shown here as a switch: id -> (value when off, value when on, label key).
 SWITCH_CHOICES = {'TLG_RENDERER': ('1', '2', 'gfx_renderer_v2')}
 SECTIONS = (
+    ('nat_section', ('n:output', 'n:internal')),
     ('gfx_sec_renderer', ('TLG_RENDERER', 'TLG_NATIVE_PASSES')),
-    ('gfx_sec_image', ('s:display_mode', 's:vsync', 'menu:fsr1', 'menu:rcas', 'menu:rcas_strength',
+    ('gfx_sec_image', ('s:display_mode', 's:vsync', 'menu:fsr1', 'menu:rcas', 'menu:rcas_strength', 'menu:iss_temporal', 'menu:iss_temporal_mode',
                         'TLG_BARRIER_MERGE')),
     ('gfx_sec_rate', ('menu:fps_limit', 'menu:frames_queued')),
-    ('gfx_sec_view', tuple(i.id for i in backports_table.MENU if i.tab == 'View')),
+    ('gfx_sec_view', tuple(i.id for i in backports_table.MENU if i.tab == 'View' and not i.hidden)),
     ('gfx_sec_gpu', ('TLG_ASYNC_SHADERS', 'TLG_BACKGROUND_WARMUP', 's:gpu_readbacks', 's:eager_readback',
                      's:write_merge', 'TLG_DEFERRED_READBACK', 'TLG_STALE_READBACK', 'TLG_DRAIN_SLEEP', 's:precompile_shaders',
                      's:close_on_play', 's:reopen_launcher')),
@@ -48,6 +52,9 @@ STEPS = {'menu:overlay_scale': 10, 's:vram_budget_mb': 200}
 class Graphics(QObject):
     changed = Signal()
     vramFound = Signal(object)
+    dlssProgressed = Signal(int, int)
+    dlssChecked = Signal(object)
+    dlssFinished = Signal(object)    # a Component, or a DlssError
     scrollRequested = Signal(int)   # used by the screenshot tool
     dialogChanged = Signal()
 
@@ -67,6 +74,13 @@ class Graphics(QObject):
         self._dialog, self._handlers = {}, {}
         self._imported = None      # (profile name, targets) of the last imported file
         self.vramFound.connect(self._on_vram)
+        self._dlss_confirm, self._dlss_busy = False, False
+        self._dlss_cancel = threading.Event()
+        self._dlss_msg, self._dlss_tone, self._dlss_done, self._dlss_total = '', 'info', 0, 0
+        self._dlss_checked = None
+        self.dlssChecked.connect(self._on_dlss_checked)
+        self.dlssProgressed.connect(self._on_dlss_progress)
+        self.dlssFinished.connect(self._on_dlss_finished)
         backend.profileChanged.connect(self.rebuild)
         backend.langChanged.connect(self.rebuild)
         backend.saves.changed.connect(self.changed)
@@ -87,6 +101,7 @@ class Graphics(QObject):
             self.vramFound.emit(self.probes['vram']() if 'vram' in self.probes else
                                 gfxlogic.detect_vram_mb(self._gpu_name()))
         threading.Thread(target=work, daemon=True).start()
+        self._check_dlss()
 
     def _gpu_name(self):
         gpu = self.backend._gpu
@@ -139,6 +154,53 @@ class Graphics(QObject):
             row['index'] = next((i for i, (n, _) in enumerate(options) if n == str(value)), 0)
         return row
 
+    # -- output and internal resolution (tlg.ini: iss_native_output, iss_native_percent) ---------------
+    def _renderer_v2(self):
+        """Same test as infamous_run.renderer_v2, on the states the screen already holds."""
+        return backports_table.effective(gfxlogic.item_by_id('TLG_RENDERER'), self.backend.fix_states) == '2'             and tlg_run.V2_PROBE.is_file()
+
+    def _native_row(self, rid):
+        output, percent = native_resolution.read(tlg_run.read_ini(tlg_run.user_dir() / 'tlg.ini'))
+        t = self.backend.t_
+        v2 = self._renderer_v2()
+        row = {'kind': 'item', 'id': rid, 'code': '', 'label': '', 'what': '', 'tags': [self._tag(False)],
+               'shaderWarn': '', 'changed': False, 'control': 'combo', 'on': False, 'options': [], 'index': 0,
+               'lo': 0, 'hi': 0, 'step': 1, 'unit': '', 'value': 0, 'valueText': '', 'disabled': not v2,
+               'decimals': 0, 'note': '' if v2 else self.t('nat_needs_v2'), 'info': '', 'action': None}
+        if rid == 'n:output':
+            options = native_resolution.output_options(t)
+            row.update(label=self.t('nat_output'), what=self.t('nat_output_what'), changed=output != 0,
+                       options=[{'value': v, 'label': label} for v, label in options], index=output)
+            return row
+        options = native_resolution.internal_options(t, output, percent)
+        current = native_resolution.internal_value(output, percent)
+        text, tone = native_resolution.summary(t, output, percent)
+        row.update(label=self.t('nat_internal'), what=self.t('nat_internal_what'), changed=percent != 100,
+                   options=[{'value': v, 'label': label} for v, label, _ in options],
+                   index=next((n for n, (v, _, _) in enumerate(options) if v == current), 0),
+                   disabled=not v2 or not output)
+        if v2:        # the summary says what the next start does; a warning or a refusal goes in the note
+            if output:
+                text += ' ' + self.t('nat_restart')
+            row['note' if tone != 'info' else 'info'] = text
+        return row
+
+    def _set_native(self, rid, value):
+        path = tlg_run.user_dir() / 'tlg.ini'
+        output, percent = native_resolution.read(tlg_run.read_ini(path))
+        if rid == 'n:output':
+            new_output = int(value)
+            percent = native_resolution.retarget(output, percent, new_output)
+            output = new_output
+        elif value != 'custom':
+            status, best, *_ = native_resolution.pick(output, int(value))
+            if status != native_resolution.PICK_OK:      # the game would refuse it: keep what is stored
+                self.rebuild()
+                return
+            percent = best
+        native_resolution.save(path, output, percent)
+        self.rebuild()
+
     def _item_row(self, rid):
         item = gfxlogic.item_by_id(rid)
         states = self.backend.fix_states
@@ -185,14 +247,17 @@ class Graphics(QObject):
                 if rid in seen:
                     continue
                 seen.add(rid)
-                rows.append(self._setting_row(rid) if rid.startswith('s:') else self._item_row(rid))
+                rows.append(self._setting_row(rid) if rid.startswith('s:') else
+                            self._native_row(rid) if rid.startswith('n:') else self._item_row(rid))
         self.model.set_rows(rows)
         self.changed.emit()
 
     # -- writing ----------------------------------------------------------------------------------------
     @Slot(str, str)
     def setValue(self, rid, value):
-        if rid in SETTING_ROWS:
+        if rid.startswith('n:'):
+            self._set_native(rid, value)
+        elif rid in SETTING_ROWS:
             key, control, _ = SETTING_ROWS[rid]
             if control == 'switch':
                 self.settings[key] = value == '1'
@@ -382,6 +447,138 @@ class Graphics(QObject):
     def canSuggest(self):
         return bool(self.suggested) and int(self.settings.get('vram_budget_mb', 0)) != self.suggested
 
+    # -- NVIDIA DLSS (dlss_setup.py): status of the two DLLs and the download ---------------------------------
+    def _dlss_configured(self):
+        return str(tlg_run.read_ini(tlg_run.user_dir() / 'tlg.ini').get('dlss_dll_dir', ''))
+
+    def _dlss_state(self):
+        """The last check (None until the first one ends): the signature check starts PowerShell, so it runs
+        on a worker thread (_check_dlss) and the properties only read its result."""
+        return self._dlss_checked
+
+    def _check_dlss(self):
+        def work():
+            state = self.probes['dlss_status']() if 'dlss_status' in self.probes else dlss_setup.status(
+                tlg_run.user_dir(), self._dlss_configured(), tlg_run.V2_PROBE.parent)
+            self.dlssChecked.emit(state)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_dlss_checked(self, state):
+        self._dlss_checked = state
+        self.changed.emit()
+
+    def _dlss_target(self):
+        configured = self._dlss_configured()
+        return Path(configured) if configured else dlss_setup.default_folder(tlg_run.user_dir())
+
+    @Property(str, notify=changed)
+    def dlssHint(self):
+        return self.t('dlss_what')
+
+    @Property(str, notify=changed)
+    def dlssDllLine(self):
+        state = self._dlss_state()
+        return dlss_setup.dll_line(self.t, state['dll']) if state else self.t('dlss_checking')
+
+    @Property(str, notify=changed)
+    def dlssBridgeLine(self):
+        state = self._dlss_state()
+        return dlss_setup.bridge_line(self.t, state['bridge']) if state else ''
+
+    @Property(str, notify=changed)
+    def dlssReadyLine(self):
+        state = self._dlss_state()
+        return self.t('dlss_ready') if state and dlss_setup.usable(state) else ''
+
+    @Property(bool, notify=changed)
+    def dlssHasDll(self):
+        state = self._dlss_state()
+        return bool(state and state['dll'].ok)
+
+    @Property(bool, notify=changed)
+    def dlssConfirming(self):
+        return self._dlss_confirm
+
+    @Property(bool, notify=changed)
+    def dlssBusy(self):
+        return self._dlss_busy
+
+    @Property(str, notify=changed)
+    def dlssConfirmText(self):
+        return self.t('dlss_confirm', mb=dlss_setup.NOMINAL_MB, url=dlss_setup.SOURCE_URL, repo=dlss_setup.REPO_URL)
+
+    @Property(str, notify=changed)
+    def dlssProgressText(self):
+        mb = 1024 * 1024
+        if self._dlss_total:
+            return self.t('dlss_progress', done=self._dlss_done // mb, total=self._dlss_total // mb)
+        return self.t('dlss_progress_unknown', done=self._dlss_done // mb)
+
+    @Property(float, notify=changed)
+    def dlssProgress(self):
+        return self._dlss_done / self._dlss_total if self._dlss_total else 0.0
+
+    @Property(str, notify=changed)
+    def dlssMessage(self):
+        return self._dlss_msg
+
+    @Property(str, notify=changed)
+    def dlssMessageTone(self):
+        return self._dlss_tone
+
+    @Slot()
+    def askDlssDownload(self):
+        if not self._dlss_busy:
+            self._dlss_confirm, self._dlss_msg = True, ''
+            self.changed.emit()
+
+    @Slot()
+    def cancelDlssAsk(self):
+        self._dlss_confirm = False
+        self.changed.emit()
+
+    @Slot()
+    def startDlssDownload(self):
+        """The confirmed download, on a worker thread; progress and the end come back as signals."""
+        if self._dlss_busy:
+            return
+        self._dlss_confirm, self._dlss_busy = False, True
+        self._dlss_cancel.clear()
+        self._dlss_done = self._dlss_total = 0
+        target = self._dlss_target()
+        download = self.probes.get('dlss_download', dlss_setup.download)
+
+        def work():
+            try:
+                result = download(target, progress=self.dlssProgressed.emit, cancel=self._dlss_cancel)
+            except dlss_setup.DlssError as error:
+                result = error
+            except Exception as error:      # never leave the screen stuck on "downloading"
+                result = dlss_setup.DlssError('network', error)
+            self.dlssFinished.emit(result)
+        threading.Thread(target=work, daemon=True).start()
+        self.changed.emit()
+
+    @Slot()
+    def cancelDlssDownload(self):
+        self._dlss_cancel.set()
+
+    def _on_dlss_progress(self, done, total):
+        self._dlss_done, self._dlss_total = done, total
+        self.changed.emit()
+
+    def _on_dlss_finished(self, result):
+        self._dlss_busy = False
+        if isinstance(result, dlss_setup.DlssError):
+            self._dlss_msg = self.t('dlss_err_' + result.key, detail=result.detail)
+            self._dlss_tone = 'info' if result.key == 'cancelled' else 'bad'
+        else:
+            version = '.'.join((result.version or '?').split('.')[:3])
+            self._dlss_msg, self._dlss_tone = self.t('dlss_done', version=version, path=str(result.path)), 'good'
+        self.changed.emit()
+        if not isinstance(result, dlss_setup.DlssError):
+            self._check_dlss()
+
     # -- shader cache ----------------------------------------------------------------------------------------
     def read_cache_bytes(self):
         return self.backend.cache_bytes()   # measured off the UI thread (Backend.measure_cache)
@@ -400,11 +597,11 @@ class Graphics(QObject):
 
     @Property(bool, notify=changed)
     def gameRunning(self):
-        return self.backend.saves.is_running()
+        return self.backend.saves.running_now()
 
     @Property(bool, notify=changed)
     def canClear(self):
-        return bool(self.cache_bytes()) and not self.backend.saves.is_running()
+        return bool(self.cache_bytes()) and not self.backend.saves.running_now()
 
     @Property(bool, notify=changed)
     def confirming(self):

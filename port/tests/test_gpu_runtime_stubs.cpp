@@ -35,5 +35,14 @@ void runtime_karma_load_begin() {}
 void runtime_karma_request(int) { std::abort(); }
 void runtime_karma_set_enabled(int) {}
 int runtime_mouse_aim_installed() { return 0; }
+// The shared overlay now links trophy callbacks; these tests still have no guest/save session.
+struct IssTrophyBackend;
+// The overlay registers its callback table at library load, before any guest exists.
+// Accept registration only; actual save/guest operations below must still abort.
+void runtime_trophy_set_backend(const IssTrophyBackend*) {}
+void runtime_trophy_save_open(int,int,uint64_t) { std::abort(); }
+void runtime_trophy_save_part(int,const void*,int64_t,int64_t,int) { std::abort(); }
+void runtime_trophy_save_close(int) { std::abort(); }
+int runtime_trophy_save_mode_ready() { return 0; }
 }
 

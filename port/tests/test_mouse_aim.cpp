@@ -3,6 +3,8 @@
 #include <vector>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/mman.h>
 #endif
 #include "../src/iss_karma.h"
 #include "../src/iss_mouse_aim.h"
@@ -72,6 +74,10 @@ int main(){
     puts("Mailbox: fallback, sensitivity, single consumption, capture loss, pause expiry and invert passed.");
 #ifdef _WIN32
     auto *code=(unsigned char*)VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);assert(code);
+#else
+    auto *code=(unsigned char*)mmap(nullptr,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(code!=MAP_FAILED);
+#endif
     const unsigned char harness[]={0x41,0x54,0x41,0x55,0x48,0x83,0xec,0x68,
         0x49,0x89,0xfd,0x49,0x89,0xf4,0x48,0x89,0x54,0x24,0x50,
         0xc4,0xc1,0x78,0x10,0x85,0x30,3,0,0,
@@ -79,8 +85,13 @@ int main(){
     const unsigned char resume[]={0x48,0x83,0xc4,0x68,0x41,0x5d,0x41,0x5c,0xc3};
     memcpy(code+2048,harness,sizeof(harness));memcpy(code+3000,resume,sizeof(resume));
     unsigned n=iss_karma_bridge_ex(code,(uintptr_t)edit_angles,iss_mouse_expected+9,(uintptr_t)(code+3000),18,4);
-    assert(n<2048);DWORD old;assert(VirtualProtect(code,4096,PAGE_EXECUTE_READ,&old));
+    assert(n<2048);
+#ifdef _WIN32
+    DWORD old;assert(VirtualProtect(code,4096,PAGE_EXECUTE_READ,&old));
     FlushInstructionCache(GetCurrentProcess(),code,4096);
+#else
+    assert(!mprotect(code,4096,PROT_READ|PROT_EXEC));
+#endif
     alignas(32) unsigned char state[0x350]={0};
     float input[8]={1,2,3,4,5,6,7,8};memcpy(state+0x330,input,32);
     bridge_data=data;bridge_context=ctx;
@@ -89,7 +100,10 @@ int main(){
     float result[8];memcpy(result,state+0x330,32);
     assert(result[0]==1.25f && result[1]==0.5f);
     for(int i=2;i<8;i++)assert(result[i]==input[i]);
+#ifdef _WIN32
     VirtualFree(code,0,MEM_RELEASE);
-    puts("Executed camera bridge: saved angles editable, context/data arguments valid, original stores and XMM1 preserved.");
+#else
+    munmap(code,4096);
 #endif
+    puts("Executed camera bridge: saved angles editable, context/data arguments valid, original stores and XMM1 preserved.");
 }

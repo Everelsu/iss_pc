@@ -1,21 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Pattern and behavior adapted from junminlee2004's public inFAMOUS Second Son
-     shadPS4 cheat entry. This entry is limited to our supported CUSA00223 build. -->
 <Patch>
-  <TitleID><ID>CUSA00223</ID></TitleID>
-  <Metadata Title="inFAMOUS Second Son"
-            Name="Skip intro movie"
-            Note="Returns immediately from the boot splash movie start. It skips the logo movie before the title screen; story cutscenes are unchanged."
-            Author="junminlee2004"
-            PatchVer="1.0"
-            AppVer="01.07"
-            AppElf="eboot.bin"
-            isEnabled="false">
+  <TitleID>
+    <ID>CUSA00223</ID>
+  </TitleID>
+  <Metadata Title="inFAMOUS Second Son" Name="Skip intro movie" Note="Returns immediately from the boot splash movie start. It skips the logo movie before the title screen; story cutscenes are unchanged." Author="junminlee2004" PatchVer="1.0" AppVer="01.07" AppElf="eboot.bin" isEnabled="false">
     <PatchList>
-      <Line Type="mask"
-            Address="55 48 89 E5 41 57 41 56 53 48 83 EC 18 4C 8B 3D ?? ?? ?? ?? 49 89 FE 49 8B 07 48 89 45 E0 49 8B 46"
-            Offset="0"
-            Value="C3"/>
+      <Line Type="mask" Address="55 48 89 E5 41 57 41 56 53 48 83 EC 18 4C 8B 3D ?? ?? ?? ?? 49 89 FE 49 8B 07 48 89 45 E0 49 8B 46" Offset="0" Value="C3" />
+    </PatchList>
+  </Metadata>
+  <Metadata Title="inFAMOUS Second Son" Name="Disable motion blur" Note="Disables camera motion blur through the engine's own blur-off branch. CUSA00223 update 1.07 only. Applies on the next launch; disable and restart to restore. Does not remove atmospheric fog or depth of field." Author="junminlee2004 (native-port adaptation)" PatchVer="1.0" AppVer="01.07" AppElf="eboot.bin" isEnabled="false">
+    <PatchList>
+      <Line Type="mask" Address="0F 85 8A 04 00 00 48 8D 05 18 36 CF 00 80 38 00 0F 85 7A 04 00 00" Offset="0x400000" Value="E98B04000090" />
     </PatchList>
   </Metadata>
 </Patch>

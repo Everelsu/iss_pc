@@ -83,6 +83,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.key_map = value;
         return;
     }
+    if (key == "dlss_dll_dir") {
+        v.dlss_dll_dir = value;
+        return;
+    }
     if (key == "lod_bands") {
         // Six comma-separated distances; missing or bad entries keep the current value.
         const char* p = value.c_str();
@@ -131,12 +135,6 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.rumble = i != 0;
     } else if (key == "mouse_sensitivity") {
         v.mouse_sensitivity = Clamp(value.empty() ? 1.0f : f, 0.05f, 10.0f);
-    } else if (key == "mouse_smoothing") {
-        v.mouse_smoothing = Clamp(f, 0.0f, 0.95f);
-    } else if (key == "mouse_accel") {
-        v.mouse_accel = Clamp(f, 0.0f, 2.0f);
-    } else if (key == "mouse_deadzone") {
-        v.mouse_deadzone = Clamp(f, 0.0f, 0.5f);
     } else if (key == "sensor_aim") {
         v.sensor_aim = std::clamp(i, 25, 200);
     } else if (key == "graffiti_guide_seen") {
@@ -163,6 +161,21 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.iss_native_percent = std::clamp(i,25,200);
     } else if (key == "iss_native_hud_edges") {
         v.iss_native_hud_edges = i != 0;
+    } else if (key == "iss_temporal") {
+        v.iss_temporal = i != 0;
+    } else if (key == "iss_temporal_mode") {
+        v.iss_temporal_mode = std::clamp(i, 0, 4);
+    } else if (key == "iss_temporal_backend") {
+        v.iss_temporal_backend = std::clamp(i, 0, 1);
+    } else if (key == "iss_power_glow") {
+        v.iss_power_glow=std::clamp(f,0.5f,3.0f);
+    } else if (key == "iss_power_instant") {
+        v.iss_power_instant=i!=0;
+    } else if (key == "iss_power_switch_enabled") {
+        v.iss_power_switch_enabled=i!=0;
+    } else if (key == "iss_power_key_smoke" || key == "iss_power_key_neon" || key == "iss_power_key_video" || key == "iss_power_key_concrete") {
+        int index=key=="iss_power_key_smoke"?0:key=="iss_power_key_neon"?1:key=="iss_power_key_video"?2:3;
+        v.iss_power_keys[index]=std::clamp(i,0,511);
     } else if (key == "iss_native_ui_16_9") {
         v.iss_native_ui_16_9 = std::clamp(i,0,2);
     } else if (key == "render_resolution") {
@@ -189,6 +202,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.blue_orb_multiplier = TlgOrbs::ClampMultiplier(f);
     } else if (key == "gold_orb_multiplier") {
         v.gold_orb_multiplier = TlgOrbs::ClampMultiplier(f);
+    } else if (key == "quality_target_fps") {
+        v.quality_target_fps = i <= 0 ? 0 : std::clamp(i, 20, 240);
+    } else if (key == "quality_floor") {
+        v.quality_floor = std::clamp(i, 0, 14);
+    } else if (key == "draw_budget") {
+        v.draw_budget = std::clamp(i, 10, 100);
+    } else if (key == "dyn_cull") {
+        v.dyn_cull = std::clamp(i, 0, 2);
     } else if (key == "lod_scale") {
         v.lod_scale = TlgView::ClampLodScale(f);
     } else if (key == "region_lod") {
@@ -256,9 +277,11 @@ void Load() {
         {"TLG_RCAS", "rcas"},                        {"TLG_FRAMES_AHEAD", "frames_queued"},
         {"TLG_SHOW_FPS", "show_fps"},             {"TLG_SENSOR_AIM", "sensor_aim"},
         {"TLG_MOUSE", "mouse_enabled"},           {"TLG_MOUSE_SENS", "mouse_sensitivity"},
-        {"TLG_MOUSE_INVERT_Y", "mouse_invert_y"}, {"TLG_MOUSE_SMOOTHING", "mouse_smoothing"},
-        {"TLG_MOUSE_ACCEL", "mouse_accel"},       {"TLG_MOUSE_DEADZONE", "mouse_deadzone"},
+        {"TLG_MOUSE_INVERT_Y", "mouse_invert_y"},
         {"TLG_RUMBLE", "rumble"},
+        {"TLG_DYN_CULL", "dyn_cull"},             {"TLG_DRAW_BUDGET", "draw_budget"},   {"TLG_QUALITY_FLOOR", "quality_floor"},
+        {"TLG_QUALITY_TARGET_FPS", "quality_target_fps"}, {"TLG_ISS_TEMPORAL", "iss_temporal"},
+        {"TLG_ISS_TEMPORAL_BACKEND", "iss_temporal_backend"}, {"TLG_ISS_TEMPORAL_MODE", "iss_temporal_mode"}, {"TLG_DLSS_DIR", "dlss_dll_dir"},
         {"TLG_LOD_SCALE", "lod_scale"},           {"TLG_LOD_BANDS", "lod_bands"},
         {"TLG_REGION_LOD", "region_lod"},         {"TLG_REGION_FADE", "region_fade"},
         {"TLG_NEAR_CLIP", "near_clip"},           {"TLG_FAR_CLIP", "far_clip"},
@@ -360,6 +383,12 @@ void Save() {
     std::fprintf(file, "iss_native_output=%d\niss_native_percent=%d\niss_native_hud_edges=%d\n",
                  v.iss_native_output.load(),v.iss_native_percent.load(),int(v.iss_native_hud_edges.load()));
     std::fprintf(file, "iss_native_ui_16_9=%d\n",int(v.iss_native_ui_16_9.load()));
+    std::fprintf(file, "iss_temporal=%d\niss_temporal_mode=%d\n", int(v.iss_temporal.load()), v.iss_temporal_mode.load());
+    std::fprintf(file, "iss_temporal_backend=%d\ndlss_dll_dir=%s\n", v.iss_temporal_backend.load(), v.dlss_dll_dir.c_str());
+    std::fprintf(file,"iss_power_switch_enabled=%d\niss_power_key_smoke=%d\niss_power_key_neon=%d\niss_power_key_video=%d\niss_power_key_concrete=%d\n",
+        int(v.iss_power_switch_enabled.load()),v.iss_power_keys[0].load(),v.iss_power_keys[1].load(),v.iss_power_keys[2].load(),v.iss_power_keys[3].load());
+    std::fprintf(file,"iss_power_instant=%d\n",int(v.iss_power_instant.load()));
+    std::fprintf(file,"iss_power_glow=%.2f\n",v.iss_power_glow.load());
     std::fprintf(file, "red_orb_multiplier=%.3f\n", v.red_orb_multiplier.load());
     std::fprintf(file, "damage_dealt=%.3f\n", v.damage_dealt.load());
     std::fprintf(file, "damage_taken=%.3f\n", v.damage_taken.load());
@@ -395,10 +424,12 @@ void Save() {
                  int(v.graffiti_guide_seen.load()));
     std::fprintf(file,
                  "lod_scale=%.3f\nregion_lod=%.3f\nregion_fade=%.3f\nnear_clip=%.3f\nfar_clip=%.0f\n"
-                 "mip_lod_bias=%.3f\nlod_bands=%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\n",
+                 "mip_lod_bias=%.3f\nlod_bands=%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\ndyn_cull=%d\ndraw_budget=%d\nquality_floor=%d\nquality_target_fps=%d\n",
                  v.lod_scale.load(), v.region_lod.load(), v.region_fade.load(), v.near_clip.load(),
                  v.far_clip.load(), v.mip_lod_bias.load(), v.lod_bands[0].load(), v.lod_bands[1].load(),
-                 v.lod_bands[2].load(), v.lod_bands[3].load(), v.lod_bands[4].load(), v.lod_bands[5].load());
+                 v.lod_bands[2].load(), v.lod_bands[3].load(), v.lod_bands[4].load(), v.lod_bands[5].load(),
+                 v.dyn_cull.load(), v.draw_budget.load(), v.quality_floor.load(),
+                 v.quality_target_fps.load());
     // Fixes: applied on the next start by the launcher (TLG_BPnn / TLG_<NAME>); only the ones
     // the player or the launcher chose are written.
     for (int n = 0; n < kBackportPrefs; ++n) {
@@ -408,10 +439,9 @@ void Save() {
         if (const int p = v.extra_pref[e]; p >= 0) std::fprintf(file, "%s=%d\n", kExtraKeys[e], p);
     }
     std::fprintf(file,
-                 "mouse_enabled=%d\nmouse_sensitivity=%.2f\nmouse_invert_y=%d\nmouse_smoothing=%.2f\n"
-                 "mouse_accel=%.2f\nmouse_deadzone=%.2f\nrumble=%d\nkey_map=%s\n",
+                 "mouse_enabled=%d\nmouse_sensitivity=%.2f\nmouse_invert_y=%d\n"
+                 "rumble=%d\nkey_map=%s\n",
                  int(v.mouse_enabled.load()), v.mouse_sensitivity.load(), int(v.mouse_invert_y.load()),
-                 v.mouse_smoothing.load(), v.mouse_accel.load(), v.mouse_deadzone.load(),
                  int(v.rumble.load()), v.key_map.c_str());
     // Read by run.sh at start.
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
@@ -436,3 +466,8 @@ const char* UpscalerName(int upscaler) {
 }
 
 } // namespace TlgSettings
+extern "C" void tlggpu_power_wheel_settings(int *enabled,int keys[4],int *instant){
+    auto &s=TlgSettings::Get();*enabled=int(s.iss_power_switch_enabled.load());
+    *instant=int(s.iss_power_instant.load());
+    for(int i=0;i<4;i++)keys[i]=s.iss_power_keys[i].load();
+}

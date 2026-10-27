@@ -81,6 +81,7 @@ typedef struct { uint64_t submitted, shown, presented, vblanks, faults_in_progre
 void tlggpu_frame_counters(TlgGpuFrameCounters *out);
 /* Draws recorded so far (gameplay detection for scripted routes, src/runtime_pad.c). */
 uint64_t tlggpu_total_draws(void);
+
 /* The game opened a file (guest path): feeds the region trace (TLG_REGION_TRACE=1, gpu/shim/tlg_region.h). */
 void tlggpu_note_open(const char *guest_path);
 /* The mouse, gathered by the window thread while the game has it (SDL relative mode: the window
@@ -99,7 +100,7 @@ void tlggpu_mouse_take(TlgGpuMouse *mouse);
 typedef struct {
     int32_t mouse_enabled, invert_y;
     int32_t rumble;             /* controller vibration on (tlg.ini rumble, TLG_RUMBLE) */
-    float sensitivity, smoothing, accel, deadzone;
+    float sensitivity;
     char key_map[512];
 } TlgGpuInputSettings;
 void tlggpu_input_settings(TlgGpuInputSettings *settings);
