@@ -46,6 +46,12 @@ jobs:
         run: |
           sudo mkdir -p /opt/tlgdeps && sudo chown "$USER" /opt/tlgdeps
           bash packaging/linux/build_deps.sh
+      - name: Save successfully built libraries
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/tlgdeps
+          key: tlgdeps-ubuntu2404-${{ hashFiles('port/packaging/linux/build_deps.sh') }}
       - name: Build
         id: build
         run: |
