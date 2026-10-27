@@ -558,7 +558,7 @@ static void load_pad_mode(void) {
 /* What sample_mouse decided for this sample; sample_host turns it into touches and buttons. */
 static struct { bool active, two_fingers; MouseTouch finger; MouseTouchOut out; } mouse_pad;
 
-/* The mouse: motion on the right stick, buttons and wheel pulses as source bits (1 << (source -
+/* The mouse: native camera motion, buttons and wheel pulses as source bits (1 << (source -
  * MOUSE_SOURCE)). A wheel notch holds its button WHEEL_PULSE_US, then WHEEL_GAP_US up, so each
  * notch is one press (menus scroll one item per notch). TLG_MOUSE_LOG=1 (or TLG_MOUSE_TEST)
  * logs what the game gets. Called under lock. */
