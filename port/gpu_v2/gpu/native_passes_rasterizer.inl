@@ -1832,6 +1832,12 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
             return reject(RejectTargets);
         }
     }
+    if (iss_temporal && iss_temporal->UiActive()) {
+        // Drawing below the output size: the command processor redirects each draw (a replay would draw
+        // into the guest's images, at the render size).
+        ResetBindings(false);
+        return reject(RejectTargets);
+    }
     const RenderState render = BeginRendering(pipeline);
     if (attachment_feedback_loop) {
         ResetBindings(false);

@@ -1543,6 +1543,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline,bool is_indexed,u32
     }
     if (cycles) g_draw_cycles.Mark(7);
 
+    if (iss_ui_scale_x != 1.0f) IssUiScalePushData();
     pipeline->BindResources(set_writes, push_data);
     if (cycles) g_draw_cycles.Mark(8);
     UpdateDynamicState(pipeline, is_indexed);
@@ -1778,6 +1779,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         runtime.FlushBarriers();
     }
 
+    if (iss_ui_scale_x != 1.0f) IssUiScalePushData();
     pipeline->BindResources(set_writes, push_data);
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
@@ -3436,9 +3438,18 @@ bool Rasterizer::BindResources(const Pipeline* pipeline,
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = captured_push_data ? *captured_push_data : MakeUserData(DrawRegs());
+    // FSR 3 asks for a sharper mip level while the scene renders below the output: the G-buffer pass (five or
+    // more render targets) samples the material textures with a negative bias. Shadows, post-processing and
+    // the user interface keep the guest's.
+    iss_sampler_lod_bias = 0.0f;
+    if (iss_temporal && !pipeline->IsCompute() &&
+        std::popcount(static_cast<const GraphicsPipeline*>(pipeline)->GetGraphicsKey().mrt_mask & 0xffu) >= 5) {
+        iss_sampler_lod_bias = iss_temporal->SceneMipBias();
+    }
     // ISS_NATIVE_MATERIALS learns from the descriptors resolved here, not from a replay.
     const bool stage_memo = StageMemoEnabled() && !captured_push_data && !pipeline->IsCompute() &&
-                            !native_image_capture && StageMemoContextEligible();
+                            !native_image_capture && StageMemoContextEligible() &&
+                            !(iss_temporal && iss_temporal->UiActive());
     if (StageMemoEnabled() && !pipeline->IsCompute() && ++stage_memo_stats.report >= 262144) {
         stage_memo_stats.report = 0;
         ReportStageMemo();
@@ -4693,8 +4704,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             image.usage.storage |= is_storage;
             image.usage.texture |= !is_storage;
 
-            image_infos.emplace_back(VK_NULL_HANDLE, *image_view->image_view,
-                                     image.backing->state.layout);
+            vk::ImageView sampled_view = *image_view->image_view;
+            vk::ImageLayout sampled_layout = image.backing->state.layout;
+            if (!is_storage && iss_temporal && iss_temporal->UiActive()) {
+                // Drawing below the output size: the image has an output-size twin written this frame.
+                iss_temporal->RedirectSampled(image_id, desc.view_info, sampled_view, sampled_layout);
+            }
+            image_infos.emplace_back(VK_NULL_HANDLE, sampled_view, sampled_layout);
             if (native_image_capture) {
                 native_image_capture->push_back(NativeImageCapture{
                     .id = image_id,
@@ -4741,6 +4757,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         static_cast<u32>(ssharp.border_color_type.Value()),
                         DrawRegs().ta_bc_base.Address());
             ssharp = AmdGpu::Sampler{};
+        }
+        if (iss_sampler_lod_bias != 0.0f && !sampler.is_depth) {
+            // The S# keeps the bias in 1/256 steps, 14 bits, signed.
+            const float biased = std::clamp(ssharp.LodBias() + iss_sampler_lod_bias, -31.0f, 31.0f);
+            ssharp.lod_bias.Assign(static_cast<u64>(static_cast<s32>(std::lround(biased * 256.0f)) & 0x3fff));
         }
         // Sampler memo: the handle found for an S# (and border color base) while no sampler
         // was deleted, without the cache lock.
@@ -4796,6 +4817,11 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     state.height = instance.GetMaxFramebufferHeight();
     state.num_layers = std::numeric_limits<u16>::max();
     state.num_color_attachments = std::bit_width(key.mrt_mask);
+    // Drawing below the output size (IssTemporal::Upscaler::Redirect*): the targets of this draw may be
+    // output-size twins; then its viewport, scissor and screen-space positions are scaled to match.
+    const bool ui_active = iss_temporal && iss_temporal->UiActive();
+    bool ui_redirected = false;
+    iss_ui_scale_x = iss_ui_scale_y = 1.0f;
     for (auto cb = 0u; cb < state.num_color_attachments; ++cb) {
         auto& [image_id, desc] = cb_descs[cb];
         if (!image_id) {
@@ -4809,6 +4835,24 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         }
         texture_cache.UpdateImage(image_id);
         runtime.SetBackingSamples(image, key.color_samples[cb]);
+        IssTemporal::UiTarget ui_target;
+        if (ui_active && iss_temporal->RedirectColor(image_id, desc.view_info, ui_target)) {
+            const auto& col_buf = regs.color_buffers[cb];
+            const bool is_clear = texture_cache.ConsumeMetaClear(col_buf.CmaskAddress(), 0);
+            state.width = std::min<u32>(state.width, ui_target.width);
+            state.height = std::min<u32>(state.height, ui_target.height);
+            state.num_layers = std::min<u32>(state.num_layers, 1u);
+            const auto clear_value =
+                is_clear ? LiverpoolToVK::ColorBufferClearValue(col_buf) : vk::ClearValue{};
+            auto& attachment = state.color_attachments[cb];
+            attachment.image_view = ui_target.view;
+            attachment.image_layout = ui_target.layout;
+            attachment.clear_value = clear_value.color.uint32;
+            attachment.is_clear = is_clear;
+            image->usage.render_target = 1u;
+            ui_redirected = true;
+            continue;
+        }
         const auto& image_view = texture_cache.FindRenderTarget(image_id, desc);
         const auto slice = image_view.info.range.base.layer;
         const auto mip = image_view.info.range.base.level;
@@ -4880,22 +4924,27 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
                                     ? vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal
                                 : has_stencil ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
                                               : vk::ImageLayout::eDepthReadOnlyOptimal;
-        needs_barrier |= runtime.Transit(&image, new_layout,
-                                         vk::PipelineStageFlagBits2::eEarlyFragmentTests |
-                                             vk::PipelineStageFlagBits2::eLateFragmentTests,
-                                         vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
-                                             vk::AccessFlagBits2::eDepthStencilAttachmentRead,
-                                         desc.view_info.range);
+        IssTemporal::UiTarget ui_depth;
+        const bool depth_redirected = ui_active && iss_temporal->RedirectDepth(image_id, ui_depth);
+        if (!depth_redirected) {
+            needs_barrier |= runtime.Transit(&image, new_layout,
+                                             vk::PipelineStageFlagBits2::eEarlyFragmentTests |
+                                                 vk::PipelineStageFlagBits2::eLateFragmentTests,
+                                             vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
+                                                 vk::AccessFlagBits2::eDepthStencilAttachmentRead,
+                                             desc.view_info.range);
+        }
 
-        state.width = std::min<u32>(state.width, image.info.size.width);
-        state.height = std::min<u32>(state.height, image.info.size.height);
+        state.width = std::min<u32>(state.width, depth_redirected ? ui_depth.width : image.info.size.width);
+        state.height = std::min<u32>(state.height, depth_redirected ? ui_depth.height : image.info.size.height);
         state.num_layers = std::min<u32>(state.num_layers, image_view.info.range.extent.layers);
 
         auto& attachment = state.depth_stencil_attachment;
-        attachment.image_view = *image_view.image_view;
-        attachment.image_layout = image.backing->state.layout;
+        attachment.image_view = depth_redirected ? ui_depth.view : *image_view.image_view;
+        attachment.image_layout = depth_redirected ? ui_depth.layout : image.backing->state.layout;
         attachment.clear_value = {};
         attachment.is_clear = 0;
+        ui_redirected |= depth_redirected;
 
         if (regs.depth_buffer.DepthValid()) {
             attachment.clear_value[0] = is_depth_clear ? std::bit_cast<u32>(regs.depth_clear) : 0u;
@@ -4931,8 +4980,27 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     if (state.num_layers == std::numeric_limits<u16>::max()) {
         state.num_layers = 1;
     }
+    if (ui_redirected) {
+        iss_ui_scale_x = iss_temporal->UiScaleX();
+        iss_ui_scale_y = iss_temporal->UiScaleY();
+        // The twins are plain General-layout images: one pass must be over before the next one uses what it wrote.
+        if (!iss_ui_last_valid || !(state == iss_ui_last_state) || iss_temporal->UiSampledPending()) {
+            iss_temporal->UiBarrier();
+        }
+        iss_ui_last_state = state;
+        iss_ui_last_valid = true;
+    } else {
+        iss_ui_last_valid = false;
+    }
 
     return state;
+}
+
+void Rasterizer::IssUiScalePushData() {
+    push_data.xoffset *= iss_ui_scale_x;
+    push_data.xscale *= iss_ui_scale_x;
+    push_data.yoffset *= iss_ui_scale_y;
+    push_data.yscale *= iss_ui_scale_y;
 }
 
 void Rasterizer::Resolve() {
@@ -5858,7 +5926,7 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
         return value && value[0] == '1';
     }();
     auto& native = native_draw_state;
-    const bool eligible = enabled && !cp_split_enabled && !native.failed;
+    const bool eligible = enabled && !cp_split_enabled && !native.failed && iss_ui_scale_x == 1.0f;
     const u64 context_changes = DrawContextChanges();
     const bool reuse = eligible && native.pipeline == pipeline &&
                        native.context_changes == context_changes &&
@@ -6004,6 +6072,12 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.height = yscale * 2.0f;
         }
 
+        if (iss_ui_scale_x != 1.0f && !regs.IsClipDisabled()) {
+            viewport.x *= iss_ui_scale_x;
+            viewport.width *= iss_ui_scale_x;
+            viewport.y *= iss_ui_scale_y;
+            viewport.height *= iss_ui_scale_y;
+        }
         viewports.push_back(viewport);
 
         auto vp_scsr = scsr;
@@ -6017,10 +6091,23 @@ void Rasterizer::UpdateViewportScissorState() const {
             vp_scsr.bottom_right_y = std::min(AmdGpu::Scissor::Clamp(vp_scsr.bottom_right_y),
                                               regs.viewport_scissors[i].bottom_right_y);
         }
-        scissors.push_back({
-            .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
-            .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
-        });
+        if (iss_ui_scale_x != 1.0f) {
+            // Pixels of the guest's render size to pixels of the twin.
+            const auto sx = [&](s32 v) { return static_cast<s32>(std::lround(v * iss_ui_scale_x)); };
+            const auto sy = [&](s32 v) { return static_cast<s32>(std::lround(v * iss_ui_scale_y)); };
+            const s32 left = sx(vp_scsr.top_left_x), top = sy(vp_scsr.top_left_y);
+            const s32 right = sx(static_cast<s32>(vp_scsr.top_left_x) + static_cast<s32>(vp_scsr.GetWidth()));
+            const s32 bottom = sy(static_cast<s32>(vp_scsr.top_left_y) + static_cast<s32>(vp_scsr.GetHeight()));
+            scissors.push_back({
+                .offset = {left, top},
+                .extent = {static_cast<u32>(std::max(right - left, 0)), static_cast<u32>(std::max(bottom - top, 0))},
+            });
+        } else {
+            scissors.push_back({
+                .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
+                .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
+            });
+        }
     }
 
     if (viewports.empty()) {

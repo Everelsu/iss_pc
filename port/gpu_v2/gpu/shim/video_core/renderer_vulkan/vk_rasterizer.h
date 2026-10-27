@@ -996,6 +996,16 @@ private:
     /// Made when the first marker arrives; declared after the caches it uses, so it goes first.
     std::unique_ptr<IssTemporal::Upscaler> iss_temporal;
     IssTemporal::DepthTargets iss_depth_targets;
+    /// Output size over render size while the draws go to the upscaler's output-size twins (1 otherwise); set by
+    /// BeginRendering, used by the viewport, the scissor and the push constants of the same draw.
+    float iss_ui_scale_x = 1.0f, iss_ui_scale_y = 1.0f;
+    /// Extra texture LOD bias of the draw being bound (the scene's G-buffer pass while rendering below the output).
+    float iss_sampler_lod_bias = 0.0f;
+    /// The render state of the last redirected draw: a change of it (or a texture read of a twin) needs a barrier.
+    RenderState iss_ui_last_state{};
+    bool iss_ui_last_valid = false;
+    /// The push constants of a redirected draw: screen-space positions in output pixels.
+    void IssUiScalePushData();
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 
