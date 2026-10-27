@@ -479,10 +479,10 @@ void ImageTab() {
                                         "há folga (menus e carregamentos são ignorados). O mínimo abaixo continua valendo.")
                                    : TL(Unsupported, "Indisponível: versão do jogo ou assinatura do código diferente."));
         SliderRow(TL("Minimum dynamic quality level", "Nível mínimo da qualidade dinâmica"), s.quality_floor, 0, 14, "%d",
-                  s.view_supported ? TL("The game steps its quality level (0 best, 20 lowest: shorter LOD, fewer shadow cascades, fewer "
+                  s.view_supported ? TL("The game steps its quality level (0 best, 14 lowest: shorter LOD, fewer shadow cascades, fewer "
                                         "objects) up in heavy scenes and back down in light ones. Raising the minimum keeps the "
                                         "lighter levels: more FPS on weak hardware, less detail.",
-                                        "O jogo sobe o nível de qualidade (0 melhor, 20 mais baixo: LOD mais curto, menos cascatas de sombra, "
+                                        "O jogo sobe o nível de qualidade (0 melhor, 14 mais baixo: LOD mais curto, menos cascatas de sombra, "
                                         "menos objetos) em cenas pesadas e desce nas leves. Subir o mínimo mantém os níveis mais leves: "
                                         "mais FPS em máquina fraca, menos detalhe.")
                                    : TL(Unsupported, "Indisponível: versão do jogo ou assinatura do código diferente."));
@@ -506,7 +506,7 @@ void ImageTab() {
             s.mip_lod_bias = 0.0f;
             s.dyn_cull = 0;
             s.draw_budget = 100;
-            s.quality_floor = 0;
+            s.quality_floor = 1;
             s.quality_target_fps = 0;
             const float bands[6] = {400.0f, 750.0f, 1500.0f, 3500.0f, 6000.0f, 15000.0f};
             for (int b = 0; b < 6; ++b) s.lod_bands[b] = bands[b];

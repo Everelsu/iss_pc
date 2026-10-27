@@ -28,16 +28,18 @@ _WINDOWS = os.name == 'nt'
 # pass_env: give ISS_<suffix> to the game; False when the game reads the ini key itself (the
 #   in-game menu writes it too, and an environment variable would override the menu).
 # choices: ((value, en, pt), ...) for 'choice'; lo/hi/unit for 'int'.
+# hidden: kept in the table (ini key, defaults, presets and tests still know it) but not shown by the
+#   launchers; the in-game menu may still have it. Used for options that wait for validation.
 Item = namedtuple('Item', 'id group key env vtype default choices lo hi unit shader live store '
-                          'pass_env risky broken name what source tab')
+                          'pass_env risky broken name what source tab hidden')
 Item.__new__.__defaults__ = ()
 
 
 def _make(id, group, key, env, vtype, default, name, what, *, choices=(), lo=0, hi=0, unit='',
           shader=False, live=False, store='ini', pass_env=False, risky=False, broken=False,
-          source='', tab=''):
+          source='', tab='', hidden=False):
     return Item(id, group, key, env, vtype, default, choices, lo, hi, unit, shader, live, store,
-                pass_env, risky, broken, name, what, source, tab)
+                pass_env, risky, broken, name, what, source, tab, hidden)
 
 
 def _bp(n, default, shader, live, name, what, source, risky=False):
@@ -101,7 +103,8 @@ MENU = [
            'Em cenas pesadas o jogo sobe um nível de qualidade sozinho e, nos níveis 15 a 20, pula uma parte dos '
            'objetos e partículas ao acaso. Desempenho começa a pular antes: mais fluido, menos detalhe.'),
           choices=(('0', "The game's own", 'Do jogo'), ('1', 'Never drop objects', 'Nunca descartar objetos'),
-                   ('2', 'Performance (drop from level 11)', 'Desempenho (descarta a partir do nível 11)'))),
+                   ('2', 'Performance (drop from level 11)', 'Desempenho (descarta a partir do nível 11)')),
+          hidden=True),
     _menu('View', 'quality_target_fps', 'choice', '0',
           ('Automatic quality: target frame rate', 'Qualidade automática: taxa de quadros alvo'),
           ('Raises the minimum quality level while the frame rate stays under the target and gives it back when '
@@ -109,12 +112,13 @@ MENU = [
            'Sobe o nível mínimo de qualidade enquanto a taxa de quadros fica abaixo do alvo e devolve quando '
            'há folga (menus e carregamentos são ignorados). O mínimo abaixo continua valendo.'),
           choices=(('0', 'Off', 'Desligado'), ('30', '30 FPS', '30 FPS'), ('45', '45 FPS', '45 FPS'),
-                   ('60', '60 FPS', '60 FPS'))),
-    _menu('View', 'quality_floor', 'int', '0', ('Minimum dynamic quality level', 'Nível mínimo da qualidade dinâmica'),
-          ('The game steps its quality level (0 best, 20 lowest: shorter LOD, fewer shadow cascades, fewer objects) '
+                   ('60', '60 FPS', '60 FPS')),
+          hidden=True),
+    _menu('View', 'quality_floor', 'int', '1', ('Minimum dynamic quality level', 'Nível mínimo da qualidade dinâmica'),
+          ('The game steps its quality level (0 best, 14 lowest: shorter LOD, fewer shadow cascades, fewer objects) '
            'up in heavy scenes and back down in light ones. Raising the minimum keeps the lighter levels: more FPS '
            'on weak hardware, less detail.',
-           'O jogo sobe o nível de qualidade (0 melhor, 20 mais baixo: LOD mais curto, menos cascatas de sombra, '
+           'O jogo sobe o nível de qualidade (0 melhor, 14 mais baixo: LOD mais curto, menos cascatas de sombra, '
            'menos objetos) em cenas pesadas e desce nas leves. Subir o mínimo mantém os níveis mais leves: '
            'mais FPS em máquina fraca, menos detalhe.'), lo=0, hi=14),
     _make('menu:draw_budget', 'menu', 'draw_budget', '', 'int', '100',
@@ -123,7 +127,7 @@ MENU = [
            'sooner in heavy scenes. Read at start.',
            'Parte das listas de comandos de 24 MB / 10 MB do quadro. Menor faz o jogo reduzir LOD, sombras e detalhe '
            'mais cedo em cenas pesadas. Lido na partida.'),
-          lo=10, hi=100, unit='%', live=False, tab='View'),
+          lo=10, hi=100, unit='%', live=False, tab='View', hidden=True),
     _menu('View', 'mip_lod_bias', 'float', '0', ('Texture LOD bias (MipLodBias)', 'Bias de LOD das texturas (MipLodBias)'),
           ('Negative: sharper textures at a distance (more shimmer, a little more GPU). Positive: blurrier.',
            'Negativo: texturas mais nítidas ao longe (mais cintilação, um pouco mais de GPU). Positivo: mais borradas.'),

@@ -715,7 +715,7 @@ class Launcher:
             inner = self.scrolled(page)
             tab = None
             for item in backports_table.ITEMS:
-                if item.group != group:
+                if item.group != group or item.hidden:
                     continue
                 if item.tab and item.tab != tab:
                     tab = item.tab
