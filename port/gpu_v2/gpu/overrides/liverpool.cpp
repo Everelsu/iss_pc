@@ -175,6 +175,7 @@ static void CommitGbufferDraw(AmdGpu::Regs& regs, const iss::native_gbuffer::Bat
 
 void IssPinCommandProcessor(); // bridge.cpp, ISS_CP_CPU
 void IssEngineMarker(const u32* payload); // vk_rasterizer.cpp, ISS_ENGINE_MARKERS
+bool IssTemporalRedirecting();           // vk_rasterizer.cpp: draws go to output-size twins (iss_temporal_upscaler.h)
 bool IssPassCostEnabled();                 // vk_rasterizer.cpp, ISS_PASS_COST
 void IssPassCostTick(u32 packet_class);
 extern u64 g_iss_dcb_lo, g_iss_dcb_hi;    // buffer_cache.cpp, ISS_OBTAIN_CENSUS
@@ -2008,7 +2009,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     const ng::Batch* batch = ng::Find(marker);
                     // Pause guard: in the pause the range is interpreted (original engine path).
                     if (!batch || batch->end > dcb.data() + dcb.size() || CpSplitActive() ||
-                        iss::pause_guard::Blocked()) {
+                        iss::pause_guard::Blocked() || IssTemporalRedirecting()) {
                         ng::NoteRange(ng::Mismatch, 0);
                         break;
                     }

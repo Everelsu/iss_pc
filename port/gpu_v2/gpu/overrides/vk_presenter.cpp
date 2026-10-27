@@ -681,7 +681,7 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
     // The draws of the frame must all be recorded before the redirection ends.
-    if (TlgSettings::Get().iss_temporal.load(std::memory_order_relaxed)) {
+    if (IssTemporal::Redirecting()) {
         rasterizer->DrainDrawPipe(5);
     }
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
@@ -724,10 +724,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // its own (the guest's buffer holds the render-size version). Asks for it for every flip: that also ends
     // the redirection of the draws.
     IssTemporal::DisplayImage ui_display;
-    vk::ComponentMapping ui_mapping{};
-    ui_mapping.a = vk::ComponentSwizzle::eOne;
-    const bool ui_override = IssTemporal::DisplayOverride(
-        cpu_address, GetFrameViewFormat(attribute.attrib.pixel_format), ui_mapping, ui_display);
+    const bool ui_override = IssTemporal::DisplayOverride(cpu_address, ui_display);
     const bool streamed = present_stream && !fsr_settings.enable && !ui_override &&
                           !draw_scheduler.DirectCommandBuffer();
     vk::CommandBuffer cmdbuf{};
@@ -748,8 +745,19 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     auto image_view = *image.FindView(view_info).image_view;
     vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
     if (ui_override) {
-        image_view = ui_display.view;
-        image_size = vk::Extent2D{ui_display.width, ui_display.height};
+        // A copy of the output-size image in the layout the passes sample; the image itself stays in General.
+        vk::ComponentMapping ui_mapping{};
+        ui_mapping.a = vk::ComponentSwizzle::eOne;
+        const vk::ImageView ui_view = streamed ? vk::ImageView{} : IssTemporal::RecordDisplayCopy(
+            cmdbuf, ui_display, GetFrameViewFormat(attribute.attrib.pixel_format), ui_mapping);
+        if (ui_view) {
+            image_view = ui_view;
+            image_size = vk::Extent2D{ui_display.width, ui_display.height};
+        } else {
+            LOG_WARNING(Render_Vulkan, "IssTemporal: the output-size frame could not be presented, showing the guest's buffer");
+        }
+        // The twin stays alive until the commands that read it are done.
+        draw_scheduler.DeferOperation([keep = std::move(ui_display.keep)] {});
     }
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
     static vk::Extent2D native_last_size{};
@@ -816,21 +824,6 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
                     vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
-    if (ui_override) {
-        // The twin lives in the General layout; the passes below sample it.
-        const vk::ImageMemoryBarrier2 to_sample{
-            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eFragmentShader,
-            .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
-            .oldLayout = vk::ImageLayout::eGeneral,
-            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-            .image = ui_display.image,
-            .subresourceRange = frame_subresources,
-        };
-        cmdbuf.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_sample});
-    }
-
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
@@ -851,19 +844,6 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         image_view = fsr_pass.Render(cmdbuf, image_view, image_size,
                                      {frame->width, frame->height}, fsr_settings, frame->is_hdr);
         pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
-    }
-    if (ui_override) {
-        const vk::ImageMemoryBarrier2 to_draw{
-            .srcStageMask = vk::PipelineStageFlagBits2::eFragmentShader,
-            .srcAccessMask = vk::AccessFlagBits2::eNone,
-            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-            .oldLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-            .newLayout = vk::ImageLayout::eGeneral,
-            .image = ui_display.image,
-            .subresourceRange = frame_subresources,
-        };
-        cmdbuf.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_draw});
     }
 
     DebugState.game_resolution = {image_size.width, image_size.height};

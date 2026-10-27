@@ -1368,7 +1368,9 @@ std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
     // ISS_NATIVE_PASSES learn request: the full path (DrawRecord), which keeps the template.
     const bool pass_learn = native_pass_learn != 0 && !pipelined;
     // Pause guard (pause_guard.h): in the pause every native/fast path below is off.
-    const bool native_off = pass_learn || iss::pause_guard::Blocked();
+    // While the draws are redirected to output-size twins (IssTemporal), only the draw paths that scale their
+    // own viewport and push constants (DrawRecord, DrawIndirect) may run.
+    const bool native_off = pass_learn || iss::pause_guard::Blocked() || (iss_temporal && iss_temporal->UiActive());
     if(!pipelined){DrainDrawPipe(5);SubmitFeedbackBatch(scheduler);PeriodicSubmit(scheduler);}
     iss::diagnostics::Scope phase_scope(iss::diagnostics::Draw);
     RENDERER_TRACE;
@@ -1632,13 +1634,18 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline,bool is_indexed,u32
         DumpAfter(pipeline);
     }
     if (cycles) g_draw_cycles.Mark(11);
-    if (FastDrawEnabled()) {
+    // A redirected draw's state is not one a fast draw may repeat (it points at this frame's twins).
+    const bool ui_draw = iss_ui_scale_x != 1.0f;
+    if (FastDrawEnabled() && !ui_draw) {
         CaptureFastDraw(pipeline, is_indexed, state);
     }
     NoteDrawCensus(state, 4, pipeline, DrawRegs());
     ResetBindings(false);
-    if (FastDrawEnabled()) {
+    if (FastDrawEnabled() && !ui_draw) {
         FinishFastDraw();
+    }
+    if (ui_draw) {
+        fast_draw.valid = false;
     }
     if (cycles) {
         g_draw_cycles.Mark(12);
@@ -4819,9 +4826,57 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     state.num_color_attachments = std::bit_width(key.mrt_mask);
     // Drawing below the output size (IssTemporal::Upscaler::Redirect*): the targets of this draw may be
     // output-size twins; then its viewport, scissor and screen-space positions are scaled to match.
-    const bool ui_active = iss_temporal && iss_temporal->UiActive();
+    bool ui_active = iss_temporal && iss_temporal->UiActive();
     bool ui_redirected = false;
     iss_ui_scale_x = iss_ui_scale_y = 1.0f;
+    if (ui_active) {
+        // All or nothing: every target of the render size in this draw goes to its twin, or the redirection
+        // is given up for the rest of the frame (the presenter then shows the guest's buffer).
+        u32 fit = 0, other = 0;
+        const char* why = nullptr;
+        for (auto cb = 0u; cb < state.num_color_attachments && !why; ++cb) {
+            auto& [image_id, desc] = cb_descs[cb];
+            if (!image_id) {
+                continue;
+            }
+            if (texture_cache.GetImage(image_id).binding.needs_rebind) {
+                image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+            }
+            switch (iss_temporal->ClassifyColor(image_id, desc.view_info)) {
+            case IssTemporal::UiFit::Yes:
+                ++fit;
+                break;
+            case IssTemporal::UiFit::No:
+                why = "a colour target of the render size has no usable output-size twin";
+                break;
+            default:
+                ++other;
+                break;
+            }
+        }
+        if (!why && db_desc.first) {
+            switch (iss_temporal->ClassifyDepth(db_desc.first)) {
+            case IssTemporal::UiFit::Yes:
+                ++fit;
+                break;
+            case IssTemporal::UiFit::No:
+                why = "the depth target of the render size has no usable output-size twin";
+                break;
+            default:
+                if (state.num_color_attachments) {
+                    ++other;
+                }
+                break;
+            }
+        }
+        if (!why && fit && other) {
+            why = "a draw mixes targets of the render size with others";
+        }
+        if (why) {
+            iss_temporal->AbortRedirect(why);
+            ui_active = false;
+        }
+    }
     for (auto cb = 0u; cb < state.num_color_attachments; ++cb) {
         auto& [image_id, desc] = cb_descs[cb];
         if (!image_id) {
@@ -4836,7 +4891,8 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         texture_cache.UpdateImage(image_id);
         runtime.SetBackingSamples(image, key.color_samples[cb]);
         IssTemporal::UiTarget ui_target;
-        if (ui_active && iss_temporal->RedirectColor(image_id, desc.view_info, ui_target)) {
+        if (ui_active && iss_temporal->ClassifyColor(image_id, desc.view_info) == IssTemporal::UiFit::Yes &&
+            iss_temporal->RedirectColor(image_id, desc.view_info, ui_target)) {
             const auto& col_buf = regs.color_buffers[cb];
             const bool is_clear = texture_cache.ConsumeMetaClear(col_buf.CmaskAddress(), 0);
             state.width = std::min<u32>(state.width, ui_target.width);
@@ -4925,7 +4981,9 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
                                 : has_stencil ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
                                               : vk::ImageLayout::eDepthReadOnlyOptimal;
         IssTemporal::UiTarget ui_depth;
-        const bool depth_redirected = ui_active && iss_temporal->RedirectDepth(image_id, ui_depth);
+        const bool depth_redirected = ui_active &&
+                                      iss_temporal->ClassifyDepth(image_id) == IssTemporal::UiFit::Yes &&
+                                      iss_temporal->RedirectDepth(image_id, ui_depth);
         if (!depth_redirected) {
             needs_barrier |= runtime.Transit(&image, new_layout,
                                              vk::PipelineStageFlagBits2::eEarlyFragmentTests |
@@ -4991,6 +5049,10 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         iss_ui_last_valid = true;
     } else {
         iss_ui_last_valid = false;
+        // A draw that is not redirected can still read a twin written by the pass before it.
+        if (iss_temporal && iss_temporal->UiSampledPending()) {
+            iss_temporal->UiBarrier();
+        }
     }
 
     return state;
@@ -6282,6 +6344,7 @@ void Rasterizer::IssTemporalMarker(const u32* payload, u32 dwords) {
     // it is recorded first, and the images change under the cached bindings.
     BumpBindEpoch();
     DrainDrawPipe(5);
+    fast_draw.valid = false;
     if (!iss_temporal) {
         iss_temporal = std::make_unique<IssTemporal::Upscaler>(instance, scheduler, runtime, texture_cache);
     }
@@ -6353,6 +6416,9 @@ bool Rasterizer::IsGpuCommandProcessorThreadId(u32 thread_id) {
 
 } // namespace Vulkan
 
+bool IssTemporalRedirecting() {
+    return Vulkan::IssTemporal::Redirecting();
+}
 void IssEngineMarker(const u32* payload) {
     Vulkan::EngineMarker(payload);
 }
