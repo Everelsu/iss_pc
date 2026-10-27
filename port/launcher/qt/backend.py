@@ -680,6 +680,67 @@ class Backend(QObject):
     def setVerboseLog(self, on):
         self.setFix(self._verbose_log_item().id, '1' if on else '0')
 
+    # -- upscaler (Home screen): one selector over fsr1 / iss_temporal / iss_temporal_backend ----------------
+    _UPSCALER_KEYS = ('fsr1', 'iss_temporal', 'iss_temporal_backend', 'iss_temporal_mode')
+
+    def _menu_item(self, key):
+        return next(i for i in backports_table.ITEMS if i.key == key)
+
+    def _menu_value(self, key):
+        return backports_table.effective(self._menu_item(key), self.fix_states)
+
+    def _upscaler_choice(self):
+        """0 off, 1 FSR 1, 2 FSR 3.1 temporal, 3 NVIDIA DLSS temporal."""
+        if self._menu_value('iss_temporal') == '1':
+            return 3 if self._menu_value('iss_temporal_backend') == '1' else 2
+        return 1 if self._menu_value('fsr1') == '1' else 0
+
+    @Property('QVariantList', notify=profileChanged)
+    def upscalerOptions(self):
+        names = (('Off', 'Desligado'), ('FSR 1 (spatial)', 'FSR 1 (espacial)'),
+                 ('FSR 3.1 (temporal)', 'FSR 3.1 (temporal)'), ('NVIDIA DLSS (temporal)', 'NVIDIA DLSS (temporal)'))
+        return [{'value': str(n), 'label': self.t_.pair(pair)} for n, pair in enumerate(names)]
+
+    @Property(int, notify=profileChanged)
+    def upscalerIndex(self):
+        return self._upscaler_choice()
+
+    @Slot(str)
+    def setUpscaler(self, value):
+        """Writes the three switches behind the selector; a temporal one also needs an output resolution."""
+        pick = int(value)
+        self.fix_states[self._menu_item('fsr1').id] = backports_table.normalize(self._menu_item('fsr1'), '1' if pick == 1 else '0')
+        self.fix_states[self._menu_item('iss_temporal').id] = backports_table.normalize(self._menu_item('iss_temporal'), '1' if pick >= 2 else '0')
+        if pick >= 2:
+            self.fix_states[self._menu_item('iss_temporal_backend').id] = backports_table.normalize(
+                self._menu_item('iss_temporal_backend'), '1' if pick == 3 else '0')
+            if self._menu_value('iss_temporal_mode') == '0':
+                self.fix_states[self._menu_item('iss_temporal_mode').id] = backports_table.normalize(
+                    self._menu_item('iss_temporal_mode'), '1')   # Quality, the usual choice
+        self._save_fixes()
+        for key in self._UPSCALER_KEYS:
+            self.fixes.refresh_item(self._menu_item(key).id)
+            self.advanced.refresh_item(self._menu_item(key).id)
+        self.refresh()
+
+    @Property(bool, notify=profileChanged)
+    def upscalerHasQuality(self):
+        return self._upscaler_choice() >= 2
+
+    @Property('QVariantList', notify=profileChanged)
+    def upscalerQualityOptions(self):
+        item = self._menu_item('iss_temporal_mode')
+        return [{'value': v, 'label': self.t_.pair((en, pt))} for v, en, pt in item.choices if v != '0']
+
+    @Property(int, notify=profileChanged)
+    def upscalerQualityIndex(self):
+        value = self._menu_value('iss_temporal_mode')
+        return max(0, int(value) - 1)
+
+    @Slot(str)
+    def setUpscalerQuality(self, value):
+        self.setFix(self._menu_item('iss_temporal_mode').id, value)
+
     # -- game language (voice and text; the interface language above is separate) ---------------
     @Property('QVariantList', notify=gameLanguageChanged)
     def gameLanguageOptions(self):

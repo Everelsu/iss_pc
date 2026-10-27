@@ -1,4 +1,7 @@
 {
+  "upscaler_label": {"en": "Upscaler", "pt": "Upscaler"},
+  "upscaler_quality_label": {"en": "Quality", "pt": "Qualidade"},
+  "upscaler_hint": {"en": "FSR 1 sharpens the final image. FSR 3.1 and DLSS render below the screen size and rebuild it (DLSS needs a GeForce RTX and the DLL, see Graphics). Applies on the next start.", "pt": "O FSR 1 amplia a imagem final. FSR 3.1 e DLSS renderizam abaixo do tamanho da tela e reconstroem (o DLSS precisa de uma GeForce RTX e da DLL, veja Gráficos). Vale na próxima partida."},
   "game_language_label": {"en": "Game language", "pt": "Idioma do jogo"},
   "game_language_auto": {"en": "Automatic (system language)", "pt": "Automático (idioma do sistema)"},
   "game_language_now": {"en": "Automatic: {name}", "pt": "Automático: {name}"},

@@ -384,6 +384,14 @@ std::string OverlayText() {
     sample.fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
     sample.frame_ms = frame_ms_avg;
     sample.upscaler = UpscalerLabel(s.upscaler);
+#ifdef TLG_RENDERER_V2
+    // inFAMOUS: the upscaler is one of its own settings (the legacy field above is the other port's).
+    if (s.iss_temporal) {
+        sample.upscaler = s.iss_temporal_backend == 1 ? "DLSS" : "FSR 3.1";
+    } else if (s.fsr1) {
+        sample.upscaler = "FSR 1";
+    }
+#endif
     return P::Format(sample, items, s.overlay_layout == 0);
 }
 
@@ -422,8 +430,31 @@ void ImageTab() {
     // built for GoW3's pipeline and make TLG's image shake, so they are not offered here.
     ImGui::SeparatorText(TL("Scaling and sharpening", "Escala e nitidez"));
     if (BeginRows("##scaling")) {
+#ifdef TLG_RENDERER_V2
+        // One selector for every upscaler: the spatial FSR 1 on the final image, or one temporal upscaler
+        // (FSR 3.1 / DLSS) that replaces the game's anti-aliasing. Off keeps the game as it is.
+        static const char* const upscaler_names[] = {TL("Off", "Desligado"), TL("FSR 1 (spatial)", "FSR 1 (espacial)"),
+                                                     "FSR 3.1 (temporal)", "NVIDIA DLSS (temporal)"};
+        static std::atomic<int> upscaler_choice{0};
+        const int current = s.iss_temporal ? (s.iss_temporal_backend == 1 ? 3 : 2) : (s.fsr1 ? 1 : 0);
+        upscaler_choice = current;
+        ChoiceRow(TL("Upscaler (temporal ones: next start)", "Upscaler (os temporais: próxima partida)"), upscaler_choice, upscaler_names, nullptr, 4,
+                  TL("FSR 1 enlarges the image on the final frame (no shimmer). FSR 3.1 and DLSS replace the game's anti-aliasing and rebuild the image from several frames; "
+                     "DLSS needs a GeForce RTX card, nvngx_dlss.dll and the tlg_dlss.dll bridge (the launcher's Graphics screen shows what is missing), without them FSR 3.1 is used.",
+                     "O FSR 1 amplia a imagem do quadro final (sem tremor). FSR 3.1 e DLSS trocam o anti-aliasing do jogo e reconstroem a imagem a partir de vários quadros; "
+                     "o DLSS precisa de uma GeForce RTX, do nvngx_dlss.dll e da ponte tlg_dlss.dll (a tela Gráficos do launcher mostra o que falta), sem eles usa-se o FSR 3.1."));
+        if (upscaler_choice != current) {
+            const int pick = upscaler_choice;
+            s.fsr1 = pick == 1;
+            s.iss_temporal = pick >= 2;
+            if (pick >= 2) s.iss_temporal_backend = pick == 3 ? 1 : 0;
+            if (pick >= 2 && s.iss_native_output == 0) s.iss_native_output = 1; // the mode row needs an output resolution
+            dirty = true;
+        }
+#else
         CheckRow(TL("Upscale with FSR 1", "Ampliar com FSR 1"), s.fsr1,
                  TL("Enlarges the game image when it is smaller than the window (spatial filter, no shimmer).", "Amplia a imagem do jogo quando ela é menor que a janela (filtro espacial, sem tremor)."));
+#endif
         ImGui::BeginDisabled(rcas_blocked);
         CheckRow(TL("Sharpening (RCAS)", "Nitidez (RCAS)"), s.rcas,
                  rcas_blocked && downscaling ? TL("No effect: the game's image is larger than the window.", "Sem efeito: a imagem do jogo é maior que a janela.")
@@ -434,13 +465,6 @@ void ImageTab() {
         SliderRow(TL("Sharpening strength", "Intensidade da nitidez"), s.rcas_strength, 0, 100, "%d%%", TL("How strong the sharpening is.", "Quão forte é a nitidez."));
         ImGui::EndDisabled();
 #ifdef TLG_RENDERER_V2
-        CheckRow(TL("Temporal upscaler FSR 3.1 (experimental, next start)", "Upscaler temporal FSR 3.1 (experimental, próxima partida)"), s.iss_temporal,
-                 TL("Replaces the game's anti-aliasing with AMD FSR 3.1 temporal. Read at start. If it cannot be created the game keeps its own anti-aliasing (see the log).",
-                    "Troca o anti-aliasing do jogo pelo FSR 3.1 temporal da AMD. Lido na partida. Se não puder ser criado, o jogo mantém o anti-aliasing dele (veja o log)."));
-        static const char* const upscalers[] = {"FSR 3.1", "NVIDIA DLSS"};
-        ChoiceRow(TL("Temporal upscaler: which one (next start)", "Upscaler temporal: qual usar (próxima partida)"), s.iss_temporal_backend, upscalers, nullptr, 2,
-                  TL("FSR 3.1 works on any card. DLSS needs a GeForce RTX card, nvngx_dlss.dll and the tlg_dlss.dll bridge (the launcher's Graphics screen shows what is missing); without them FSR 3.1 is used.",
-                     "O FSR 3.1 funciona em qualquer placa. O DLSS precisa de uma GeForce RTX, do nvngx_dlss.dll e da ponte tlg_dlss.dll (a tela Gráficos do launcher mostra o que falta); sem eles o FSR 3.1 é usado."));
         static const char* const temporal_labels[] = {TL("Native (anti-aliasing, resolution below)", "Nativo (anti-aliasing, resolução abaixo)"),
                                                       TL("Quality (1.5x)", "Qualidade (1,5x)"), TL("Balanced (1.7x)", "Equilibrado (1,7x)"),
                                                       TL("Performance (2x)", "Desempenho (2x)"), TL("Ultra performance (3x)", "Desempenho máximo (3x)")};

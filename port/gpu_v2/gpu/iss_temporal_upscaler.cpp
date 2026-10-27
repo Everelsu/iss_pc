@@ -115,6 +115,16 @@ bool SameFamily(vk::Format a, vk::Format b) {
     return family(a) != 0 && family(a) == family(b);
 }
 
+/// Both are 8-bit four-channel formats of the same size class: an image created with the mutable-format flag can
+/// be viewed as either (the presenter views the frame in the order the guest declared, which may swap red and blue).
+bool SameViewClass(vk::Format a, vk::Format b) {
+    const auto in_class = [](vk::Format f) {
+        return f == vk::Format::eR8G8B8A8Unorm || f == vk::Format::eR8G8B8A8Srgb ||
+               f == vk::Format::eB8G8R8A8Unorm || f == vk::Format::eB8G8R8A8Srgb;
+    };
+    return in_class(a) && in_class(b);
+}
+
 constexpr vk::ComponentMapping kIdentity{};
 
 /// FSR 3.1 through the portable Vulkan implementation.
@@ -1280,7 +1290,9 @@ bool Upscaler::Impl::Display(VAddr address, DisplayImage& display) {
 vk::ImageView Upscaler::Impl::RecordDisplayCopy(vk::CommandBuffer cmd, const DisplayImage& display,
                                                 vk::Format view_format, const vk::ComponentMapping& mapping) {
     auto* twin = static_cast<Twin*>(display.keep.get());
-    if (!twin || !SameFamily(view_format, twin->format)) {
+    if (!twin || !SameViewClass(view_format, twin->format)) {
+        LOG_WARNING(Render_Vulkan, "IssTemporal: presented frame: view format {} against twin format {}{}", vk::to_string(view_format),
+                    twin ? vk::to_string(twin->format) : "-", twin ? "" : " (no twin)");
         return {};
     }
     const auto device = instance.GetDevice();
@@ -1302,6 +1314,7 @@ vk::ImageView Upscaler::Impl::RecordDisplayCopy(vk::CommandBuffer cmd, const Dis
             .initialLayout = vk::ImageLayout::eUndefined,
         });
         if (!present_image) {
+            LOG_WARNING(Render_Vulkan, "IssTemporal: presented frame: the {}x{} image could not be created", display.width, display.height);
             return {};
         }
         present_format = twin->format;
