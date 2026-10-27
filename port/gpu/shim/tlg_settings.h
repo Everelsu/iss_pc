@@ -40,6 +40,9 @@ struct Values {
     // Native scene dimensions, applied once at startup; independent of output upscaling.
     std::atomic<int> iss_native_output{0}, iss_native_percent{100};
     std::atomic<bool> iss_native_hud_edges{true};
+    /// FSR 3.1 temporal upscaling of the inFAMOUS image (renderer v2, gpu_v2/gpu/iss_temporal.h). Read
+    /// per frame; with it off the renderer behaves as before. Needs the game hooks (src/iss_temporal_hook.h).
+    std::atomic<bool> iss_temporal{false};
     /// Off / no object motion, as the launcher's ISS_UPSCALER=off and ISS_OBJECT_MOTION=0 set
     /// them: a direct run (run.sh, the probe) must not pay the native-AA FSR 3 render and the
     /// ~10% object motion cost (jitter only matters while an upscaler runs).

@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Camera motion vectors for the temporal upscaler (gpu/iss_temporal.cpp): every pixel of the scene
+// depth is taken from this frame's clip space to the previous frame's with one matrix (the previous
+// view-projection times the inverse of this frame's, composed on the CPU in double precision, both
+// without jitter). Output: pixels, previous minus current, which is what FSR expects.
+// The composed matrix works for the far plane too: a point at infinity keeps its direction.
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform texture2D depth_tex;
+layout(binding = 1, rg16f) uniform writeonly image2D motion_img;
+
+layout(push_constant) uniform Constants {
+    mat4 reproject; // this frame's clip space to the previous frame's, as GLSL reads it
+    vec2 size;      // render size, pixels
+    vec2 jitter;    // this frame's image shift, pixels (x right, y down)
+};
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(size.x) || pixel.y >= int(size.y)) {
+        return;
+    }
+    const float depth = texelFetch(depth_tex, pixel, 0).r;
+    // The depth was rasterised through the jittered projection: a point at unjittered pixel q is at
+    // q + jitter. The vector is measured from the unjittered position.
+    const vec2 scene_uv = (vec2(pixel) + 0.5 - jitter) / size;
+    const vec2 ndc = vec2(scene_uv.x * 2.0 - 1.0, 1.0 - scene_uv.y * 2.0);
+
+    const vec4 prev_clip = reproject * vec4(ndc, depth, 1.0);
+    vec2 motion = vec2(0.0);
+    if (prev_clip.w > 1e-6) {
+        const vec2 prev_ndc = prev_clip.xy / prev_clip.w;
+        const vec2 prev_uv = vec2(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
+        motion = (prev_uv - scene_uv) * size;
+    }
+    imageStore(motion_img, pixel, vec4(motion, 0.0, 0.0));
+}
