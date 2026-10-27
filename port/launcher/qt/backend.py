@@ -149,6 +149,7 @@ class Backend(QObject):
     profileChanged = Signal()
     gameLanguageChanged = Signal()
     gpuFound = Signal(object)
+    padFound = Signal(object)              # controller name or None (from the probing thread)
     lineReceived = Signal(str)
     jobsProgress = Signal(str, int, int)   # shader list: phase, done, total (from the play thread)
     cacheMeasured = Signal(object)         # bytes of the shader cache (from the measuring thread)
@@ -171,6 +172,7 @@ class Backend(QObject):
         self.fix_states = tlg_run.experimental_states(self.settings)
         self._gpu = 'checking'
         self._pad = None
+        self._pad_scanning = False
         self._chips, self._ready = [], False
         self._play_state = 'idle'
         self._log = []
@@ -185,6 +187,7 @@ class Backend(QObject):
         self.fixes = FixesModel(self)
         self.advanced = FixesModel(self, 'adv')
         self.gpuFound.connect(self._on_gpu)
+        self.padFound.connect(self._on_pad)
         self.lineReceived.connect(self._on_line)
         self.jobsProgress.connect(self._on_jobs_progress)
         self.precompiler = precompile.Precompiler()
@@ -231,13 +234,36 @@ class Backend(QObject):
         def work():
             self.gpuFound.emit(self.probe('gpu', logic.detect_gpu))
         threading.Thread(target=work, daemon=True).start()
+        self.rescan_pad()
+
+    def rescan_pad(self):
+        """Looks for a controller off the UI thread: `tlg-probe --gamepad` is a process that waits at
+        least 300 ms when none is connected, and every click used to wait for it."""
+        if 'pad' in self.probes or self._pad_scanning:
+            return
+        self._pad_scanning = True
+
+        def work():
+            try:
+                self.padFound.emit(logic.detect_pad())
+            finally:
+                self._pad_scanning = False
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_pad(self, pad):
+        if pad != self._pad:
+            self._pad = pad
+            self._compute_chips()
+            self.chipsChanged.emit()
+            self.stateChanged.emit()
 
     def _on_gpu(self, gpu):
         self._gpu = gpu
         self.refresh()
 
     def refresh(self):
-        self._pad = self.probe('pad', logic.detect_pad)
+        if 'pad' in self.probes:   # a test or the selftest injects the answer: no thread
+            self._pad = self.probes['pad']()
         self.measure_cache()
         self._compute_chips()
         self._news = self.probe('news', lambda: logic.news(self.t_, self.t_.pt()))

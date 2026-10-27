@@ -82,6 +82,13 @@ class Saves(QObject):
             return bool(self.probes['running']())
         return self.backend._play_state != 'idle' or savemanager.game_running()
 
+    def running_now(self):
+        """For QML bindings, which are read after every change: the answer of the 3 s timer, not a new
+        look at the process list (the probe a test injects is always asked)."""
+        if 'running' in self.probes:
+            return bool(self.probes['running']())
+        return self.backend._play_state != 'idle' or self._running
+
     def reload(self):
         data = self.data_dir()
         self._running = self.is_running()

@@ -400,11 +400,11 @@ class Graphics(QObject):
 
     @Property(bool, notify=changed)
     def gameRunning(self):
-        return self.backend.saves.is_running()
+        return self.backend.saves.running_now()
 
     @Property(bool, notify=changed)
     def canClear(self):
-        return bool(self.cache_bytes()) and not self.backend.saves.is_running()
+        return bool(self.cache_bytes()) and not self.backend.saves.running_now()
 
     @Property(bool, notify=changed)
     def confirming(self):
